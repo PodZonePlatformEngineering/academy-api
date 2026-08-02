@@ -1,0 +1,18 @@
+{
+  "id": "WH-2WR32451HC0233532-67976317FL4543714",
+  "event_type": "BILLING.SUBSCRIPTION.ACTIVATED",
+  "resource_type": "subscription",
+  "create_time": "2026-08-02T10:15:00Z",
+  "summary": "Subscription activated",
+  "resource": {
+    "id": "I-BW452GLLEP1G",
+    "plan_id": "P-5ML4271244454362WXNWU5NQ",
+    "status": "ACTIVE",
+    "status_update_time": "2026-08-02T10:15:00Z",
+    "custom_id": "4821",
+    "create_time": "2026-08-01T09:00:00Z",
+    "billing_info": {
+      "next_billing_time": "2026-09-02T10:15:00Z"
+    }
+  }
+}

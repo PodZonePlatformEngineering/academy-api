@@ -1,0 +1,16 @@
+{
+  "id": "WH-5ZR32451HC0233535-90976320FL4543717",
+  "event_type": "BILLING.SUBSCRIPTION.EXPIRED",
+  "resource_type": "subscription",
+  "create_time": "2026-10-02T10:15:00Z",
+  "summary": "Subscription expired",
+  "resource": {
+    "id": "I-BW452GLLEP1G",
+    "plan_id": "P-5ML4271244454362WXNWU5NQ",
+    "status": "EXPIRED",
+    "status_update_time": "2026-10-02T10:15:00Z",
+    "custom_id": "4821",
+    "create_time": "2026-08-01T09:00:00Z",
+    "billing_info": {}
+  }
+}

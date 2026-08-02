@@ -1,0 +1,15 @@
+{
+  "id": "WH-7BR32451HC0233537-12976322FL4543719",
+  "event_type": "BILLING.SUBSCRIPTION.CREATED",
+  "resource_type": "subscription",
+  "create_time": "2026-08-01T09:00:00Z",
+  "summary": "Subscription created",
+  "resource": {
+    "id": "I-BW452GLLEP1G",
+    "plan_id": "P-5ML4271244454362WXNWU5NQ",
+    "status": "APPROVAL_PENDING",
+    "status_update_time": "2026-08-01T09:00:00Z",
+    "custom_id": "4821",
+    "create_time": "2026-08-01T09:00:00Z"
+  }
+}

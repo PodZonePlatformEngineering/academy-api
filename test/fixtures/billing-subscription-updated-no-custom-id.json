@@ -1,0 +1,17 @@
+{
+  "id": "WH-8CR32451HC0233538-23976323FL4543720",
+  "event_type": "BILLING.SUBSCRIPTION.UPDATED",
+  "resource_type": "subscription",
+  "create_time": "2026-08-15T12:00:00Z",
+  "summary": "Subscription updated",
+  "resource": {
+    "id": "I-UNKNOWN123456",
+    "plan_id": "P-5ML4271244454362WXNWU5NQ",
+    "status": "ACTIVE",
+    "status_update_time": "2026-08-15T12:00:00Z",
+    "create_time": "2026-08-01T09:00:00Z",
+    "billing_info": {
+      "next_billing_time": "2026-09-02T10:15:00Z"
+    }
+  }
+}
