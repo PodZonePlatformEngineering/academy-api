@@ -28,6 +28,12 @@ export interface Env {
    * (live) — the environment switch, not a secret, but env-scoped so a
    * single codebase serves both without a code change. */
   PAYPAL_API_BASE: string
+  /** The sandbox billing plan (PROJ-011/T-152) subscriptions.ts creates
+   * subscriptions against — `P-6T4453632B555204CNJX4AAQ`, GBP 1.00/month,
+   * an explicit PLACEHOLDER price (not a pricing decision, see README).
+   * Env-scoped, not hardcoded, so swapping to a real priced plan post-pilot
+   * is a config change, not a code change. */
+  PAYPAL_PLAN_ID: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts) — kept here

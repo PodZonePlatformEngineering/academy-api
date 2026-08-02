@@ -125,3 +125,34 @@ export async function assertFeatureEntitled(
     throw new NotEntitled(`trainee is not entitled to feature ${feature}`)
   }
 }
+
+export class UnknownTraineeError extends Error {}
+
+/**
+ * Resolve the verified JWT `sub` (a Stack/Neon-Auth uuid) to this trainee's
+ * numeric `trainee.id` — the same id `subscription.trainee_id` (039) and
+ * PayPal's `custom_id` (T-152) are keyed on. Reuses
+ * `academy.current_trainee_id()` (`SELECT id FROM trainee WHERE
+ * neon_auth_user_id = auth.user_id()`, SECURITY DEFINER) via the identical
+ * GUC dance as isEntitled/isFeatureEntitled, rather than querying `trainee`
+ * directly — one resolution path for "JWT sub -> trainee_id", not two.
+ */
+export async function resolveTraineeId(client: PoolClient, traineeSub: string): Promise<number> {
+  await client.query('BEGIN')
+  try {
+    await client.query("SELECT set_config('request.jwt.claims', $1, true)", [
+      JSON.stringify({ sub: traineeSub }),
+    ])
+    await client.query('SET LOCAL ROLE authenticated')
+    const result = await client.query('SELECT academy.current_trainee_id() AS trainee_id')
+    const traineeId = result.rows[0]?.trainee_id
+    if (traineeId === null || traineeId === undefined) {
+      throw new UnknownTraineeError(`no trainee row for sub ${traineeSub}`)
+    }
+    await client.query('COMMIT')
+    return Number(traineeId)
+  } catch (e) {
+    await client.query('ROLLBACK')
+    throw e
+  }
+}

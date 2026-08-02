@@ -189,3 +189,100 @@ export async function verifyWebhookSignature(
   const data = (await resp.json()) as { verification_status: 'SUCCESS' | 'FAILURE' }
   return data.verification_status === 'SUCCESS'
 }
+
+export class PayPalApiError extends Error {}
+
+export interface SubscriptionLink {
+  href: string
+  rel: string
+  method: string
+}
+
+export interface CreatedSubscription {
+  id: string
+  status: string
+  custom_id?: string
+  links: SubscriptionLink[]
+}
+
+export interface CreateSubscriptionInput {
+  planId: string
+  customId: string
+  /** Buyer redirect after approve/cancel on PayPal's hosted checkout — both
+   * optional per openapi/billing_subscriptions_v1.json's
+   * subscription_application_context_request schema (only `plan_id` is
+   * actually required to create a subscription). Omitted entirely when the
+   * caller (a future academy-frontend paywall page) doesn't supply one --
+   * PayPal falls back to its own default return behaviour rather than this
+   * repo guessing a URL for a frontend that doesn't exist yet (Phase 2).
+   */
+  returnUrl?: string
+  cancelUrl?: string
+}
+
+/**
+ * POST /v1/billing/subscriptions — creates a subscription in
+ * `APPROVAL_PENDING` state and returns the PayPal-hosted approval link
+ * (`links[].rel === 'approve'`) the caller redirects the buyer to. Request/
+ * response shape confirmed against
+ * openapi/billing_subscriptions_v1.json's `subscription_request_post` /
+ * `subscription` schemas (PayPal's official spec repo), fetched 2026-08-02
+ * — same discipline as the rest of this file. `custom_id` here is the
+ * entire point of PROJ-011/T-152: setting it to the resolved `trainee_id`
+ * at creation time is what makes T-151's webhook handler able to attribute
+ * events to a trainee at all (see subscription.ts's UnattributedSubscriptionError).
+ */
+export async function createSubscription(
+  apiBase: string,
+  accessToken: string,
+  input: CreateSubscriptionInput,
+): Promise<CreatedSubscription> {
+  const body: Record<string, unknown> = {
+    plan_id: input.planId,
+    custom_id: input.customId,
+  }
+  if (input.returnUrl && input.cancelUrl) {
+    body.application_context = {
+      user_action: 'SUBSCRIBE_NOW',
+      return_url: input.returnUrl,
+      cancel_url: input.cancelUrl,
+    }
+  }
+  const resp = await fetch(`${apiBase}/v1/billing/subscriptions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      // PayPal's own documented idempotency header for this endpoint — a
+      // fresh uuid per call (not derived from customId/time, which would
+      // give a false sense of dedup without a real client-supplied
+      // idempotency token) so a duplicate *network* retry of literally the
+      // same fetch (Cloudflare-side, not caller-side) can't double-create.
+      'PayPal-Request-Id': crypto.randomUUID(),
+    },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`create subscription failed: ${resp.status} ${await resp.text()}`)
+  }
+  return (await resp.json()) as CreatedSubscription
+}
+
+/** GET /v1/billing/subscriptions/{id} — used by callers that need to
+ * re-confirm a subscription's current state (e.g. live verification that
+ * `custom_id` round-tripped correctly). Same `subscription` response
+ * schema as createSubscription's response. */
+export async function getSubscription(
+  apiBase: string,
+  accessToken: string,
+  subscriptionId: string,
+): Promise<CreatedSubscription> {
+  const resp = await fetch(`${apiBase}/v1/billing/subscriptions/${subscriptionId}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`get subscription failed: ${resp.status} ${await resp.text()}`)
+  }
+  return (await resp.json()) as CreatedSubscription
+}
