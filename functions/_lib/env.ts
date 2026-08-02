@@ -36,15 +36,13 @@ export interface Env {
   PAYPAL_PLAN_ID: string
 }
 
-// T-145's CORS pattern (academy-web's functions/_lib/env.ts) — kept here
-// for the same shape, but empty for now. The PayPal webhook route never
-// needs it (PayPal's servers send no Origin header, and signature
-// verification — not CORS — is the actual trust boundary for that route).
-// Populate this the day a browser-facing route exists in this repo (e.g. a
-// subscription-status read for academy-frontend/vibecreations.net, Phase 2
-// of academy-api-three-tier-design-refresh.md §7) — don't guess the origin
-// now, since that Cloudflare Pages project doesn't exist yet either.
-export const ALLOWED_ORIGINS: string[] = []
+// T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
+// webhook route never needs this (PayPal's servers send no Origin header,
+// and signature verification — not CORS — is the actual trust boundary for
+// that route) — but POST /api/paypal/subscriptions (T-152) is browser-facing
+// from academy-frontend, deployed at vibecreations.net (T-153), so that's
+// the one origin this needs today.
+export const ALLOWED_ORIGINS: string[] = ['https://www.vibecreations.net']
 
 function corsHeaders(origin: string | null): Record<string, string> {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
