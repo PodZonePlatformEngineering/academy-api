@@ -1,0 +1,22 @@
+{
+  "name": "academy-api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "PROJ-011/T-151 -- academy-frontend's subscription/billing backend (PayPal). Cloudflare Pages Functions, no static assets.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "oxlint"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "jose": "^6.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vitest": "^4.1.10"
+  }
+}

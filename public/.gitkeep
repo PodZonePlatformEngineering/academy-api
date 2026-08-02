@@ -1,0 +1,4 @@
+Cloudflare Pages requires a build-output directory to exist even when a
+project is Functions-only (see README.md §"Pages Functions vs. a plain
+Worker"). This directory is intentionally otherwise empty — academy-api
+ships no static assets.
