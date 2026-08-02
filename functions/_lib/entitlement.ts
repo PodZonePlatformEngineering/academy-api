@@ -71,7 +71,7 @@ export async function assertEntitled(
 // --- Feature-level entitlement (PROJ-011/T-150, T-151) ----------------------
 //
 // TS equivalent of academy.is_feature_entitled/assert_feature_entitled
-// (academy-admin/migrations/040_subscription_feature_gate.sql, live in
+// (academy-admin/migrations/039_subscription_feature_gate.sql, live in
 // red-sunset-16158933 — see t150-entitlement-schema-decision.md for the
 // full design). Mirrors isEntitled/assertEntitled's shape exactly (same
 // withClient caller pattern, same set_config + SET LOCAL ROLE GUC dance)

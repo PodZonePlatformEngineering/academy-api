@@ -1,5 +1,5 @@
 // PROJ-011/T-151 — subscription upsert logic, the write side of T-150's
-// `subscription` table (academy-admin/migrations/040_subscription_feature_gate.sql,
+// `subscription` table (academy-admin/migrations/039_subscription_feature_gate.sql,
 // live in red-sunset-16158933). Field extraction (extractSubscriptionFields)
 // is a pure function, deliberately separated from the DB write
 // (upsertSubscription), so parsing can be unit-tested against PayPal's
@@ -19,10 +19,11 @@ export interface SubscriptionFields {
   /** PayPal's own `custom_id` field on the subscription resource — the
    * merchant-supplied identifier set when the subscription is created via
    * POST /v1/billing/subscriptions (openapi/billing_subscriptions_v1.json:
-   * "The custom id for the subscription. Can be invoice id."). The
-   * subscription-creation endpoint that sets this to a trainee id is
-   * Phase 2's job (academy-frontend's paywall, the natural place a
-   * "subscribe" action lives) — see README's "known gap" note. */
+   * "The custom id for the subscription. Can be invoice id."). Set to the
+   * resolved `trainee_id` by this repo's own
+   * `functions/api/paypal/subscriptions.ts` (PROJ-011/T-152) — the gap
+   * T-151's README flagged ("nothing in this repo sets custom_id yet") is
+   * closed. */
   customId: string | null
 }
 
@@ -56,13 +57,26 @@ export function extractSubscriptionFields(event: WebhookEvent): SubscriptionFiel
  *     a real scenario, not a hypothetical). custom_id is expected to be
  *     present on every event for a given subscription (it's a property of
  *     the subscription resource itself, not one specific event type), so
- *     this is the common path once Phase 2 sets it at creation time.
+ *     this is now the common path — `subscriptions.ts` (T-152) sets
+ *     custom_id at creation time.
  *   - customId absent -> UPDATE-only, matched on paypal_subscription_id.
  *     If it affects zero rows, there is no way to attribute a brand-new
  *     subscription to a trainee — throws UnattributedSubscriptionError
  *     rather than silently dropping the write. The caller (webhook.ts)
- *     still acks PayPal with 200 (this is a data-attribution problem, not
- *     a transport/signature failure PayPal should retry) but logs it.
+ *     still acks PayPal with 200 rather than returning a retryable
+ *     status — **resolved, not left open, as of T-152** (brief §4): now
+ *     that every subscription this repo creates always carries custom_id
+ *     from its very first webhook event onward, a real subscription
+ *     hitting this branch would mean either (a) a canned Webhook
+ *     Simulator test delivery (a fake resource id that will never
+ *     correspond to a real row or a real custom_id, however many times
+ *     PayPal retried it — retrying doesn't fix a payload PayPal is
+ *     replaying verbatim) or (b) a genuine data anomaly needing a human to
+ *     triage, which PayPal auto-retrying also can't fix. Since neither
+ *     realistic trigger benefits from a retry, 200-ack-and-log stays the
+ *     safer default rather than switching to 404/5xx and risking a
+ *     multi-hour retry storm against Simulator test traffic for no
+ *     corresponding upside.
  */
 export async function upsertSubscription(client: PoolClient, fields: SubscriptionFields): Promise<void> {
   let traineeId: number | null = null

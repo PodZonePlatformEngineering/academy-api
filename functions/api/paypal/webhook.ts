@@ -4,7 +4,7 @@
 // JWT — PayPal itself is the caller), verified via PayPal's own
 // verify-webhook-signature endpoint (_lib/paypal.ts, confirmed against
 // PayPal's current OpenAPI spec, not assumed). Verified writes land in
-// `subscription` (academy-admin/migrations/040_subscription_feature_gate.sql,
+// `subscription` (academy-admin/migrations/039_subscription_feature_gate.sql,
 // live) via _lib/subscription.ts's idempotent upsert.
 //
 // UNTESTED against a real PayPal delivery pending a sandbox app's
@@ -73,9 +73,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     })
   } catch (e) {
     if (e instanceof UnattributedSubscriptionError) {
-      // Ack (200) rather than let PayPal retry forever — this needs a human
-      // to look at it (a subscription PayPal thinks exists but this DB has
-      // no way to attribute to a trainee), not an automatic retry storm.
+      // Ack (200) rather than let PayPal retry — reconfirmed, not just
+      // carried over, now that PROJ-011/T-152's subscriptions.ts sets
+      // custom_id on every subscription this repo creates: see
+      // subscription.ts's upsertSubscription docstring for the full
+      // reasoning (brief §4) on why a retryable 404/5xx isn't the safer
+      // choice here even though real subscriptions can now be attributed.
       console.error(`[paypal webhook] ${e.message}`)
       return json({ received: true, handled: false, error: e.message }, 200)
     }
