@@ -22,11 +22,12 @@ import {
   assertFeatureEntitled,
   resolveActiveSubscriptionId,
   insertUsageRow,
+  backfillCost,
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
 import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
-import { proxyToGateway, GatewayError, type ChatRequestBody } from '../../_lib/gateway'
+import { proxyToGateway, fetchGatewayLogCost, GatewayError, type ChatRequestBody } from '../../_lib/gateway'
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
 
@@ -95,7 +96,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   context.waitUntil(
     (async () => {
       const usage = await gatewayResult.usage
-      await withClient(env.NEON_DATABASE_URL, (client) => insertUsageRow(client, traineeId, subscriptionId, usage))
+      const gatewayLogId = gatewayResult.gatewayLogId
+      const rowId = await withClient(env.NEON_DATABASE_URL, (client) =>
+        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId),
+      )
+      // Async half (T-160): cost isn't on the inference response, only on
+      // the Gateway's logs endpoint, and that endpoint's indexing lags the
+      // inference response by a beat under real conditions (unlike this
+      // brief's own live check against a quiet gateway) — a few short
+      // retries absorbs that without a separate cron/Worker.
+      if (gatewayLogId) {
+        for (const delayMs of [0, 1500, 3000]) {
+          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
+          const cost = await fetchGatewayLogCost(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_LOGS_TOKEN, gatewayLogId)
+          if (cost !== null) {
+            await withClient(env.NEON_DATABASE_URL, (client) => backfillCost(client, rowId, cost))
+            break
+          }
+        }
+      }
     })().catch((e) => console.error('ai_gateway_usage write failed', e)),
   )
 

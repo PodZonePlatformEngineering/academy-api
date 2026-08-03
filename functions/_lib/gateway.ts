@@ -69,6 +69,18 @@ export interface GatewayUsage {
 }
 
 /**
+ * PROJ-011/T-160 — the `cf-aig-log-id` response header question, resolved
+ * with evidence (t157-inference-delivery-design.md §3's flagged open item):
+ * live-checked 2026-08-03 against this account/gateway, both non-streaming
+ * and `stream: true` requests. The header is present on both. This means
+ * `gateway_log_id` never needs a backfill at all — it's known the moment
+ * the Gateway response headers arrive, before the body is even read.
+ */
+export function readGatewayLogId(headers: Headers): string | null {
+  return headers.get('cf-aig-log-id')
+}
+
+/**
  * Read Anthropic-shaped SSE off a (possibly tee'd) stream and pull the usage
  * totals out of it. Anthropic's streaming protocol (unchanged by Gateway
  * routing, per §2's schema-compatibility finding): `message_start` carries
@@ -140,7 +152,7 @@ export async function proxyToGateway(
   apiToken: string,
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
-): Promise<{ response: Response; usage: Promise<GatewayUsage> }> {
+): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
   const upstream = await fetch(
     `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
     {
@@ -176,5 +188,30 @@ export async function proxyToGateway(
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
     }),
     usage: readGatewayUsage(usageBranch),
+    gatewayLogId: readGatewayLogId(upstream.headers),
   }
+}
+
+/**
+ * The async half: `cost` isn't on the inference response (Anthropic's
+ * schema has no dollar figure), only on the Gateway's own logs/analytics
+ * endpoint. Live-checked 2026-08-03: querying this endpoint by the exact
+ * `gateway_log_id` captured above, immediately after the inference call
+ * completes, returns the log entry already indexed — no polling window
+ * needed, a single direct lookup by id. Called from the caller's
+ * `context.waitUntil`, so this doesn't delay the streamed response.
+ */
+export async function fetchGatewayLogCost(
+  accountId: string,
+  logsToken: string,
+  logId: string,
+): Promise<number | null> {
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${TUTOR_GATEWAY_ID}/logs/${logId}`,
+    { headers: { Authorization: `Bearer ${logsToken}` } },
+  )
+  if (!resp.ok) return null
+  const body = (await resp.json()) as { success: boolean; result?: { cost?: number } }
+  if (!body.success || typeof body.result?.cost !== 'number') return null
+  return body.result.cost
 }

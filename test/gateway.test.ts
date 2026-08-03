@@ -5,8 +5,8 @@
 // message_delta's cumulative output_tokens), the same shape the Gateway's
 // `/ai/v1/messages` endpoint is confirmed to re-emit unmodified (§2 of
 // t157-inference-delivery-design.md — "strictly Anthropic's API schema").
-import { describe, expect, it } from 'vitest'
-import { readGatewayUsage } from '../functions/_lib/gateway'
+import { describe, expect, it, vi, afterEach } from 'vitest'
+import { readGatewayUsage, readGatewayLogId, fetchGatewayLogCost } from '../functions/_lib/gateway'
 
 function sseStream(events: Array<{ type: string; data: Record<string, unknown> }>): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -52,5 +52,53 @@ describe('readGatewayUsage', () => {
   it('defaults to zero counts on an empty stream', async () => {
     const usage = await readGatewayUsage(sseStream([]))
     expect(usage).toEqual({ model: null, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 })
+  })
+})
+
+// PROJ-011/T-160 — the `cf-aig-log-id` response header, live-confirmed
+// present on both streaming and non-streaming Gateway responses against
+// this account/gateway 2026-08-03 (both branches tested against
+// `gateway.ai.cloudflare.com/v1/{account}/training-gateway/anthropic/v1/messages`).
+describe('readGatewayLogId', () => {
+  it('reads cf-aig-log-id off the response headers', () => {
+    const headers = new Headers({ 'cf-aig-log-id': '01KZ3ZT8J5E1Y24SHKA2JTDA5B' })
+    expect(readGatewayLogId(headers)).toBe('01KZ3ZT8J5E1Y24SHKA2JTDA5B')
+  })
+
+  it('returns null when the header is absent', () => {
+    expect(readGatewayLogId(new Headers())).toBeNull()
+  })
+})
+
+describe('fetchGatewayLogCost', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('returns the cost field from a successful logs-endpoint lookup', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        expect(url).toBe(
+          'https://api.cloudflare.com/client/v4/accounts/acc123/ai-gateway/gateways/training-gateway/logs/log123',
+        )
+        return new Response(JSON.stringify({ success: true, result: { cost: 0.017658 } }), { status: 200 })
+      }),
+    )
+    const cost = await fetchGatewayLogCost('acc123', 'logs-token', 'log123')
+    expect(cost).toBe(0.017658)
+  })
+
+  it('returns null when the log entry is not yet indexed (404)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not found', { status: 404 })))
+    const cost = await fetchGatewayLogCost('acc123', 'logs-token', 'log123')
+    expect(cost).toBeNull()
+  })
+
+  it('returns null when the response has no numeric cost', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ success: true, result: {} }), { status: 200 })),
+    )
+    const cost = await fetchGatewayLogCost('acc123', 'logs-token', 'log123')
+    expect(cost).toBeNull()
   })
 })
