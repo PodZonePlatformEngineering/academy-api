@@ -22,14 +22,32 @@
 // (`response.body.tee()`, one branch returned untouched, the other parsed
 // for usage) is what actually delivers that, not a smaller build than the
 // SDK would have been.
-// Provider-prefixed per Cloudflare's current REST API docs
-// (developers.cloudflare.com/ai-gateway/usage/rest-api/): this unified
-// `api.cloudflare.com/.../ai/v1/messages` endpoint requires `{provider}/{model}`
-// — same convention as `/ai/run`, despite being the "Anthropic-SDK-compatible"
-// endpoint (verified 2026-08-03, T-162; do not assume this carries over to the
-// older `gateway.ai.cloudflare.com/.../anthropic/v1/messages` endpoint, which
-// takes the bare id).
-export const TUTOR_MODEL = 'anthropic/claude-sonnet-5'
+// PROJ-011/T-163 — moved off the unified `api.cloudflare.com/.../ai/v1/messages`
+// endpoint onto the provider-native `gateway.ai.cloudflare.com/v1/{account}/
+// {gateway}/anthropic/v1/messages` endpoint. Root cause (live-caught 502,
+// verified against current Cloudflare docs 2026-08-03, not assumed): the
+// unified endpoint is a normalized/translated shim over multiple providers
+// (hence needing the `{provider}/{model}` prefix below, T-162) — it rejects
+// `system` as an array of content blocks (`Invalid input: expected string,
+// received array`), which silently drops `academy-frontend`'s T-114/T-115
+// 1-hour prompt-cache breakpoint (`cache_control` lives on those array
+// blocks; a string `system` has nowhere to carry it). Cloudflare's docs for
+// the unified endpoint never mention `cache_control` or Anthropic prompt
+// caching at all — only Gateway-level HTTP response caching (`cf-aig-*`
+// headers), a different feature. The provider-native endpoint's own docs
+// (`developers.cloudflare.com/ai-gateway/usage/providers/anthropic/`) show
+// it built by pointing the real `Anthropic` SDK's `baseURL` at the gateway —
+// a true schema passthrough, not a shim — so it takes the bare model id (no
+// provider prefix) and, live-tested against this account/gateway 2026-08-03
+// with the exact production body (array `system` + `cache_control` +
+// `thinking`/`output_config` + `stream: true`), returned real
+// `cache_creation_input_tokens`/`cache_read_input_tokens` on write/read —
+// caching genuinely works here. Auth differs too: Unified Billing on this
+// endpoint is `cf-aig-authorization: Bearer <token>` (not `Authorization`),
+// confirmed live with the same `CLOUDFLARE_API_TOKEN` already deployed — no
+// new secret needed.
+export const TUTOR_GATEWAY_ID = 'training-gateway'
+export const TUTOR_MODEL = 'claude-sonnet-5'
 export const TUTOR_MAX_TOKENS = 8192
 export const TUTOR_THINKING_EFFORT = 'medium'
 
@@ -123,23 +141,30 @@ export async function proxyToGateway(
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage> }> {
-  const upstream = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      'Content-Type': 'application/json',
-      'cf-aig-metadata': JSON.stringify(metadata),
+  const upstream = await fetch(
+    `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'cf-aig-authorization': `Bearer ${apiToken}`,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+        'cf-aig-metadata': JSON.stringify(metadata),
+        // Cloudflare's edge WAF (error 1010) blocks requests with no/generic
+        // User-Agent on this endpoint — live-caught during T-163 verification.
+        'User-Agent': 'academy-api/1.0 (+academy-api.pages.dev)',
+      },
+      body: JSON.stringify({
+        model: TUTOR_MODEL,
+        max_tokens: TUTOR_MAX_TOKENS,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: TUTOR_THINKING_EFFORT },
+        system: body.system,
+        messages: body.messages,
+        stream: true,
+      }),
     },
-    body: JSON.stringify({
-      model: TUTOR_MODEL,
-      max_tokens: TUTOR_MAX_TOKENS,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: TUTOR_THINKING_EFFORT },
-      system: body.system,
-      messages: body.messages,
-      stream: true,
-    }),
-  })
+  )
 
   if (!upstream.ok || !upstream.body) {
     throw new GatewayError(upstream.status, await upstream.text())
