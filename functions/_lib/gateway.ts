@@ -22,7 +22,14 @@
 // (`response.body.tee()`, one branch returned untouched, the other parsed
 // for usage) is what actually delivers that, not a smaller build than the
 // SDK would have been.
-export const TUTOR_MODEL = 'claude-sonnet-5'
+// Provider-prefixed per Cloudflare's current REST API docs
+// (developers.cloudflare.com/ai-gateway/usage/rest-api/): this unified
+// `api.cloudflare.com/.../ai/v1/messages` endpoint requires `{provider}/{model}`
+// — same convention as `/ai/run`, despite being the "Anthropic-SDK-compatible"
+// endpoint (verified 2026-08-03, T-162; do not assume this carries over to the
+// older `gateway.ai.cloudflare.com/.../anthropic/v1/messages` endpoint, which
+// takes the bare id).
+export const TUTOR_MODEL = 'anthropic/claude-sonnet-5'
 export const TUTOR_MAX_TOKENS = 8192
 export const TUTOR_THINKING_EFFORT = 'medium'
 
