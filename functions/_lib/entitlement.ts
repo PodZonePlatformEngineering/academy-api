@@ -158,17 +158,36 @@ export async function resolveActiveSubscriptionId(
  * Gateway's separate logs/analytics endpoint; backfilling them is T-158's
  * task-3 follow-on, out of scope here.
  */
+/**
+ * PROJ-011/T-160 — `gatewayLogId` is written here, synchronously, not
+ * backfilled: the Gateway's `cf-aig-log-id` response header (live-confirmed
+ * present on every inference response, streaming or not) is already in hand
+ * by the time this insert runs, so the "no log id yet at insert time"
+ * scenario the schema's comment anticipated doesn't actually apply. Only
+ * `cost` is filled in later, via `backfillCost`.
+ */
 export async function insertUsageRow(
   client: PoolClient,
   traineeId: number,
   subscriptionId: number | null,
   usage: { model: string | null; inputTokens: number; outputTokens: number; cacheReadTokens: number },
-): Promise<void> {
-  await client.query(
-    `INSERT INTO ai_gateway_usage (trainee_id, subscription_id, provider, model, tokens_in, tokens_out, cached_tokens_in)
-     VALUES ($1, $2, 'anthropic', $3, $4, $5, $6)`,
-    [traineeId, subscriptionId, usage.model, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens],
+  gatewayLogId: string | null,
+): Promise<number> {
+  const result = await client.query<{ id: number }>(
+    `INSERT INTO ai_gateway_usage (trainee_id, subscription_id, gateway_log_id, provider, model, tokens_in, tokens_out, cached_tokens_in)
+     VALUES ($1, $2, $3, 'anthropic', $4, $5, $6, $7)
+     RETURNING id`,
+    [traineeId, subscriptionId, gatewayLogId, usage.model, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens],
   )
+  return result.rows[0].id
+}
+
+/**
+ * Idempotency guard (brief §3): `cost IS NULL` means a re-run against an
+ * already-backfilled row is a no-op, not a duplicate write or an error.
+ */
+export async function backfillCost(client: PoolClient, usageRowId: number, cost: number): Promise<void> {
+  await client.query('UPDATE ai_gateway_usage SET cost = $1 WHERE id = $2 AND cost IS NULL', [cost, usageRowId])
 }
 
 export class UnknownTraineeError extends Error {}

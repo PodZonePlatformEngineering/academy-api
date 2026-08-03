@@ -44,6 +44,13 @@ export interface Env {
    * resolved SDK-auth-header question: the Gateway's `/ai/v1/messages`
    * endpoint expects Bearer, not `X-Api-Key`). */
   CLOUDFLARE_API_TOKEN: string
+  /** `training-token-admin` (T-150 §6 item 4, T-160) — a *different*
+   * Cloudflare API token, scoped to the AI Gateway's logs/analytics
+   * endpoint (`GET .../ai-gateway/gateways/{gw}/logs`), not the invoke
+   * endpoint `CLOUDFLARE_API_TOKEN` covers. Used only to backfill
+   * `ai_gateway_usage.cost`, which isn't present on the inference response
+   * itself (Anthropic's schema has no dollar figure). */
+  CLOUDFLARE_LOGS_TOKEN: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
