@@ -126,6 +126,28 @@ export async function assertFeatureEntitled(
   }
 }
 
+/**
+ * Resolve the trainee's currently-ACTIVE `subscription.id`, or `null` if
+ * none (shouldn't happen once `assertFeatureEntitled` has already passed,
+ * since `is_feature_entitled` requires an ACTIVE row itself, but this is a
+ * separate query so it's typed as optional rather than assumed). Runs on
+ * the plain admin connection, not the GUC-scoped `authenticated` role —
+ * `subscription` grants SELECT to `authenticated` too, but there's no
+ * per-trainee session to establish here since `traineeId` is already
+ * numeric; the admin role reads it directly (same pattern webhook.ts/
+ * subscription.ts already use for `subscription` writes).
+ */
+export async function resolveActiveSubscriptionId(
+  client: PoolClient,
+  traineeId: number,
+): Promise<number | null> {
+  const result = await client.query(
+    `SELECT id FROM subscription WHERE trainee_id = $1 AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1`,
+    [traineeId],
+  )
+  return result.rows[0]?.id ?? null
+}
+
 export class UnknownTraineeError extends Error {}
 
 /**
