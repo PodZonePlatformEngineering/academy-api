@@ -44,9 +44,11 @@ bare Worker instead — Pages Functions it is.
 | `_lib/jwt.ts` | copied verbatim (T-141) | ES256 Neon Auth (Stack) JWT verification against the per-project JWKS. Not called by the webhook route (no trainee JWT on a server-to-server delivery) — wired in for the first JWT-authenticated route this repo grows (e.g. a subscription-status read for academy-frontend, Phase 2). |
 | `_lib/db.ts` | copied verbatim (T-141/T-146) | One `Pool` per Pages Function invocation, never a module-level singleton — T-146 found the hard way that a cached `Pool`'s WebSocket doesn't survive past the request that created it. |
 | `_lib/env.ts` | ported + trimmed | Same `Env`/`json`/`handleOptions` shape as academy-web's. `ALLOWED_ORIGINS` is empty here — no browser-facing route exists yet in this repo (see `_lib/env.ts`'s comment for when to populate it). |
-| `_lib/entitlement.ts` | ported + extended (T-151, T-152) | Curriculum/track `isEntitled`/`assertEntitled` copied verbatim, **plus** `isFeatureEntitled`/`assertFeatureEntitled` (T-151, TS port of T-150's `academy.is_feature_entitled`/`assert_feature_entitled`) **plus new** `resolveTraineeId` (T-152) — resolves a verified JWT `sub` to the numeric `trainee_id` `subscription.trainee_id`/PayPal's `custom_id` are keyed on, same GUC-dance shape throughout. |
+| `_lib/entitlement.ts` | ported + extended (T-151, T-152, T-158) | Curriculum/track `isEntitled`/`assertEntitled` copied verbatim, **plus** `isFeatureEntitled`/`assertFeatureEntitled` (T-151, TS port of T-150's `academy.is_feature_entitled`/`assert_feature_entitled`), `resolveTraineeId` (T-152) — resolves a verified JWT `sub` to the numeric `trainee_id` `subscription.trainee_id`/PayPal's `custom_id` are keyed on, same GUC-dance shape throughout — **plus new** `resolveActiveSubscriptionId`/`insertUsageRow` (T-158). |
 | `_lib/paypal.ts` | new (T-151) + extended (T-152) | OAuth2 client-credentials token fetch, webhook-signature verification, event-type gating, **plus** `createSubscription`/`getSubscription` (T-152). See "PayPal research" below. |
 | `_lib/subscription.ts` | new | Pure field extraction + idempotent `subscription` upsert. |
+| `_lib/turnCap.ts` | new (T-158) | `MONTHLY_TURN_CAP = 50` + `countMonthlyTurns`, the operator's T-161 rate-limit decision (a flat 50 turns/calendar month/subscription) folded into this brief. Counted off `ai_gateway_usage` — no new table. |
+| `_lib/gateway.ts` | new (T-158) | Hand-rolled `fetch()` + `response.body.tee()` proxy to Cloudflare AI Gateway's `/ai/v1/messages`, plus `readGatewayUsage` (pure SSE-parsing, unit-tested). See "Inference route" below for why this isn't the `@anthropic-ai/sdk` client despite resolving the SDK's auth-header question first. |
 
 ## PayPal research — checked against current sources, not assumed
 
@@ -169,6 +171,68 @@ sandbox plan isn't reconstructable by guessing
   Cloudflare Pages env var, not hardcoded, so swapping to a real priced plan
   post-pilot is a config change).
 
+## Inference route (`functions/api/tutor/chat.ts`, T-158)
+
+Phase 3 build 1 of `t157-inference-delivery-design.md` — platform-paid tutor
+inference for ACTIVE subscribers, routed through `academy-api` and
+Cloudflare AI Gateway instead of the trainee's own BYOK Anthropic key
+(`academy-frontend`'s existing free channel, untouched by this route).
+
+**Order**: `verifyTraineeSub` (401) -> `resolveTraineeId` (404 if unknown) ->
+`assertFeatureEntitled('inference')` (403 if no ACTIVE subscription) ->
+50-turn monthly cap check, the operator's T-161 rate-limit decision folded
+into this brief (429, checked *before* any Gateway call — never burn a
+Gateway call to reject a request) -> resolve the active `subscription.id` ->
+proxy to the Gateway's `/ai/v1/messages`, `stream: true` -> stream the
+response straight back -> write the synchronous half of `ai_gateway_usage`
+in the background (`context.waitUntil`, doesn't delay the streamed
+response).
+
+**Request body**: `{ system?: Anthropic.TextBlockParam[] | string, messages:
+Anthropic.MessageParam[] }` — the caller (task 2, `academy-frontend`'s
+`tutor.ts`, not this brief) is expected to compose these exactly as it
+already does for the direct-to-Anthropic BYOK path
+(`composeSystemBlocks`/`composeMessages`). `model`/`max_tokens`/`thinking`/
+`output_config` are **not** client-controlled — this route hardcodes them
+(`_lib/gateway.ts`'s `TUTOR_MODEL`/`TUTOR_MAX_TOKENS`/
+`TUTOR_THINKING_EFFORT`, mirroring `academy-frontend`'s `tutorConfig.ts`
+defaults) so the turn cap's cost assumption can't be bypassed by a client
+picking a pricier model or a larger token budget.
+
+**SDK-auth-header question, resolved with evidence, not assumed** (the one
+open item the design doc flagged, §2): installed
+`@anthropic-ai/sdk@0.112.3` — the exact version `academy-frontend` pins —
+and read `client.mjs`/`core/streaming.mjs` directly rather than trusting the
+docs. Finding: the SDK's `authToken` constructor option (as opposed to
+`apiKey`) drives `bearerAuth()`, which sends `Authorization: Bearer <token>`
+— exactly what the Gateway's `/ai/v1/messages` endpoint expects. `apiKey`
+would have sent `X-Api-Key` instead, which the Gateway does not accept here.
+
+**Why the actual proxy call is a hand-rolled `fetch()`, not the SDK client,
+despite that finding**: the SDK's higher-level streaming helper
+(`MessageStream`, what `client.messages.stream()` returns) has no method
+that re-emits the exact wire-format Anthropic SSE bytes it consumed — its
+`toReadableStream()` (on the lower-level `Stream` class) re-serializes each
+parsed event as newline-delimited JSON, not real `event:`/`data:` SSE
+framing. The design doc's own recommended browser-side approach (§2, option
+(a) — keep using the Anthropic SDK client-side, pointed at this route's
+`baseURL`, so `tutor.ts`'s stream-parsing code barely changes) depends on
+this route re-emitting byte-identical Anthropic SSE. `_lib/gateway.ts`
+instead does `fetch()` + `response.body.tee()`: one branch returned
+untouched as the client-facing `Response` body (true passthrough, zero
+protocol-mismatch risk), the other parsed by `readGatewayUsage` (pure,
+unit-tested against a hand-built fixture stream shaped like Anthropic's
+documented `message_start`/`message_delta` protocol) for the token counts
+`ai_gateway_usage` needs.
+
+**`ai_gateway_usage` write** (§3's synchronous half): `model`, `tokens_in`,
+`tokens_out`, `cached_tokens_in` populated from the Gateway response's own
+`usage` object; `cost`/`gateway_log_id` left `NULL` — Anthropic's API (and
+therefore the Gateway's Anthropic-schema-compatible response) doesn't return
+dollar cost at all, only token counts. Backfilling those two fields from
+`training-token-admin`'s logs endpoint is T-158's task-3 follow-on
+(t157-inference-delivery-design.md §5), out of scope here.
+
 ## Live verification (T-152 §3) — what's proven, what's gated
 
 **Deployed and live** at `https://academy-api.pages.dev` (Cloudflare Pages
@@ -232,6 +296,34 @@ browser-issued token, which needs a human OAuth round-trip to produce.
 the endpoint correctly demands and verifies a JWT (curl proof above), and
 the PayPal mechanic it drives is independently proven live (above).
 
+### T-158 (`POST /api/tutor/chat`) hits the identical gate
+
+Same JWT-minting gap, checked again rather than assumed stale:
+`get_neon_auth_config` still shows `email_password.enabled: false`,
+OAuth-only. Verified live against `https://academy-api.pages.dev/api/tutor/chat`
+without a real trainee JWT, up to the point that gap allows:
+
+- No `Authorization` header -> `401 {"error":"missing Authorization: Bearer token"}`.
+- A garbage Bearer token -> `401 {"error":"token verification failed: Invalid Compact JWS"}`.
+- `OPTIONS` preflight from `https://www.vibecreations.net` -> `204` with the
+  same CORS headers `/api/paypal/subscriptions` returns.
+
+The one piece that genuinely can't be proven live without a real JWT
+(`assertFeatureEntitled`'s `403`, and the Gateway proxy/streaming/usage-write
+happy path) is exactly the same human-OAuth-only gap above — not
+independently re-derived, not worked around.
+
+**The 50-turn cap's actual mechanism was proven live anyway**, independent of
+the JWT gap, because `countMonthlyTurns`'s query only needs a `trainee_id`,
+not a live request: seeded 49 then 50 `ai_gateway_usage` rows for a real
+ACTIVE-subscription trainee (`trainee_id = 5`) on a disposable Neon branch
+(`br-raspy-wind-abin1ibj`, created and deleted within this session — no
+production data touched), and ran the exact query `_lib/turnCap.ts` issues
+against each state: 49 rows -> `count = 49` (not blocked, correctly allows a
+50th turn); 50 rows -> `count = 50`, `count >= MONTHLY_TURN_CAP` -> `true`
+(blocks the 51st turn). This is the cap's actual gating logic, proven
+against real Postgres, not just present in the code.
+
 ## Testing — what's covered, what's genuinely blocked
 
 Per the brief's §5 (T-151) and this update (T-152): parsing and the
@@ -268,7 +360,11 @@ Live at `https://academy-api.pages.dev` (Cloudflare Pages project
 `c0c43e22b184f415d48ed9387c12c0aa`), GitHub-connected (`main`, auto-deploy
 on push). Encrypted Pages secrets already set: `NEON_DATABASE_URL`,
 `STACK_PROJECT_ID`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`,
-`PAYPAL_WEBHOOK_ID`, `PAYPAL_API_BASE`, `PAYPAL_PLAN_ID`. Not yet done (an
+`PAYPAL_WEBHOOK_ID`, `PAYPAL_API_BASE`, `PAYPAL_PLAN_ID`, and (T-158)
+`CLOUDFLARE_ACCOUNT_ID` (plain-text env var, not a secret — the account id
+isn't sensitive) + `CLOUDFLARE_API_TOKEN` (encrypted, the
+`cloudflare-podzone-token` vault credential, scoped for the `training-gateway`
+AI Gateway per T-150 §2). Not yet done (an
 operator action, needs the live URL below to exist first, which it now
 does):
 
