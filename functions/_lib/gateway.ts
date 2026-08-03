@@ -138,6 +138,330 @@ export interface ChatRequestBody {
   messages: unknown[]
 }
 
+// PROJ-011/T-168 (T-164 §2) — tool use, wired without touching the existing
+// tee-passthrough `proxyToGateway` above, which stays exactly as-is for any
+// caller that never offers tools (T-158/T-160/T-163's proven byte-passthrough
+// behaviour must not regress). See t164-personal-library-group-discussion-
+// design.md §2 in full for the reasoning this implements: Anthropic only
+// reveals `stop_reason: "tool_use"` near the END of a stream, well after any
+// `tool_use` content block's `input_json_delta` events have already gone out
+// — a naive tee would leak an unrenderable block to the browser and finish
+// the client SDK's stream while the server still owes a real answer. The fix
+// is a first-content-block-peek: read up to the first DECISIVE
+// `content_block_start` (skipping past `thinking`/`redacted_thinking` blocks,
+// which can legitimately precede the real one per T-163's `thinking` request
+// param) and branch there instead of waiting for `stop_reason`.
+
+export const CREATE_DOCUMENT_TOOL = {
+  name: 'create_document',
+  description:
+    "Create a document in the trainee's personal library, visible only to " +
+    'them unless they choose to share it.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string' },
+      content: { type: 'string', description: 'Markdown.' },
+    },
+    required: ['title', 'content'],
+  },
+} as const
+
+// The design's enforcement mechanism for the text-first-vs-tool-first binary
+// the peek logic depends on: a soft (prompted) convention, not a hard
+// protocol guarantee — see the honest-limitations note on
+// `peekFirstContentBlock` below for what happens if the model ever breaks it.
+const TOOL_USE_CONVENTION =
+  'You have a create_document tool that saves a document to the ' +
+  "trainee's personal library. If you decide to call it, call it " +
+  'immediately with no preceding commentary — explain what you did in ' +
+  'your next reply, after the tool result comes back.'
+
+/**
+ * Append the tool-use convention as an extra system block, never mutate the
+ * existing one(s). Appending AFTER whatever the client sent preserves
+ * academy-frontend's T-114 cache breakpoint on its own block untouched — the
+ * cached prefix is unchanged, this is new uncached content tacked onto the
+ * end, not a rewrite of the cached content.
+ */
+function withToolConvention(system: unknown): unknown {
+  const appendix = { type: 'text', text: TOOL_USE_CONVENTION }
+  if (Array.isArray(system)) return [...system, appendix]
+  if (typeof system === 'string') return [{ type: 'text', text: system }, appendix]
+  return [appendix]
+}
+
+function addUsage(a: GatewayUsage, b: GatewayUsage): GatewayUsage {
+  return {
+    model: b.model ?? a.model,
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+  }
+}
+
+async function fetchGatewayStream(
+  accountId: string,
+  apiToken: string,
+  metadata: { trainee_id: number; subscription_id: number | null },
+  requestBody: Record<string, unknown>,
+): Promise<Response> {
+  const upstream = await fetch(
+    `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'cf-aig-authorization': `Bearer ${apiToken}`,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+        'cf-aig-metadata': JSON.stringify(metadata),
+        'User-Agent': 'academy-api/1.0 (+academy-api.pages.dev)',
+      },
+      body: JSON.stringify({
+        model: TUTOR_MODEL,
+        max_tokens: TUTOR_MAX_TOKENS,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: TUTOR_THINKING_EFFORT },
+        stream: true,
+        ...requestBody,
+      }),
+    },
+  )
+  if (!upstream.ok || !upstream.body) {
+    throw new GatewayError(upstream.status, await upstream.text())
+  }
+  return upstream
+}
+
+interface PeekCommon {
+  reader: ReadableStreamDefaultReader<Uint8Array>
+  decoder: TextDecoder
+  leftoverBuffer: string
+}
+
+type PeekResult =
+  | (PeekCommon & { kind: 'passthrough'; prefixText: string })
+  | (PeekCommon & { kind: 'tool_use'; contentBlock: { id: string; name: string } })
+
+/**
+ * Read raw SSE off `stream` up to and including the first DECISIVE
+ * `content_block_start` event — decisive meaning `type: 'tool_use'` (branch
+ * to server-side interception) or anything else that isn't `thinking`/
+ * `redacted_thinking` (branch to passthrough; checking `!== 'thinking' &&
+ * !== 'redacted_thinking'` rather than `=== 'text'` per the design's flagged
+ * off-by-one, so a future third content-block type doesn't get silently
+ * misrouted into the interception path either).
+ *
+ * Honest limitation carried over from the design doc: this only works
+ * because the system prompt makes "tool call first, no preceding text" the
+ * only shape a tool-calling turn can take. If the model ever violates that
+ * convention and emits text before a `tool_use` block, this function still
+ * only branches on the FIRST content block — a leading `text` block would
+ * make this passthrough (correct: nothing broke, the model just didn't call
+ * the tool first this turn, no tool call happens). The failure mode the
+ * design accepts as degraded-not-broken is the reverse (impossible for
+ * `create_document`'s single-tool case since there's only one thing to lead
+ * with) — flagging precisely rather than asserting a stronger guarantee than
+ * the code actually provides.
+ */
+async function peekFirstContentBlock(stream: ReadableStream<Uint8Array>): Promise<PeekResult> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let prefixText = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return { kind: 'passthrough', prefixText, reader, decoder, leftoverBuffer: buffer }
+    buffer += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, idx + 2)
+      buffer = buffer.slice(idx + 2)
+      prefixText += rawEvent
+      const dataLine = rawEvent.split('\n').find((l) => l.startsWith('data:'))
+      if (!dataLine) continue
+      let parsed: Record<string, unknown>
+      try {
+        parsed = JSON.parse(dataLine.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (parsed.type !== 'content_block_start') continue
+      const contentBlock = parsed.content_block as Record<string, unknown> | undefined
+      const blockType = contentBlock?.type
+      if (blockType === 'thinking' || blockType === 'redacted_thinking') continue // not decisive, keep reading
+      if (blockType === 'tool_use') {
+        return {
+          kind: 'tool_use',
+          contentBlock: { id: contentBlock?.id as string, name: contentBlock?.name as string },
+          reader,
+          decoder,
+          leftoverBuffer: buffer,
+        }
+      }
+      return { kind: 'passthrough', prefixText, reader, decoder, leftoverBuffer: buffer }
+    }
+  }
+}
+
+/** Consume the rest of a tool-use round server-side (never forwarded to the
+ * client — §2's "do NOT forward anything to the client yet"), accumulating
+ * `input_json_delta` into the tool call's full JSON input, the same
+ * event-parsing pattern `readGatewayUsage` already uses for a different
+ * field. Returns once `message_stop` closes the round.
+ */
+async function consumeToolUseRound(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+  initialBuffer: string,
+): Promise<unknown> {
+  let buffer = initialBuffer
+  let inputJson = ''
+  const finish = () => {
+    reader.cancel().catch(() => {})
+    if (!inputJson.trim()) return {}
+    try {
+      return JSON.parse(inputJson)
+    } catch {
+      return {}
+    }
+  }
+
+  while (true) {
+    let idx: number
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, idx + 2)
+      buffer = buffer.slice(idx + 2)
+      const dataLine = rawEvent.split('\n').find((l) => l.startsWith('data:'))
+      if (!dataLine) continue
+      let parsed: Record<string, unknown>
+      try {
+        parsed = JSON.parse(dataLine.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (parsed.type === 'content_block_delta') {
+        const delta = parsed.delta as Record<string, unknown> | undefined
+        if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+          inputJson += delta.partial_json
+        }
+      } else if (parsed.type === 'message_stop') {
+        return finish()
+      }
+    }
+    const { done, value } = await reader.read()
+    if (done) return finish()
+    buffer += decoder.decode(value, { stream: true })
+  }
+}
+
+function buildPassthroughStream(peek: Extract<PeekResult, { kind: 'passthrough' }>): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const { reader, prefixText, leftoverBuffer } = peek
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      if (prefixText || leftoverBuffer) controller.enqueue(encoder.encode(prefixText + leftoverBuffer))
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        controller.enqueue(value)
+      }
+      controller.close()
+    },
+    cancel() {
+      reader.cancel().catch(() => {})
+    },
+  })
+}
+
+const ZERO_USAGE: GatewayUsage = { model: null, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }
+
+/**
+ * Tool-offering counterpart to `proxyToGateway` — §2's bounded (2-round)
+ * loop. Round 1 offers `tools: [CREATE_DOCUMENT_TOOL]` with `tool_choice:
+ * auto`; if that round is tool-first, the tool executes server-side and a
+ * second, FINAL round is issued with `tool_choice: { type: 'none' }` —
+ * Anthropic's documented mechanism to guarantee a tool-free (and therefore
+ * tee-safe) reply, closing the loop deterministically. Any ordinary
+ * (non-tool) turn resolves on round 1 with only a first-content-block-peek
+ * of added latency, then splices into true passthrough exactly like
+ * `proxyToGateway` — the common case pays no meaningful cost.
+ */
+export async function proxyToGatewayWithTools(
+  accountId: string,
+  apiToken: string,
+  metadata: { trainee_id: number; subscription_id: number | null },
+  body: ChatRequestBody,
+  executeCreateDocument: (input: { title: string; content: string }) => Promise<{ document_id: number }>,
+): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
+  const system = withToolConvention(body.system)
+  let messages = body.messages
+  let gatewayLogId: string | null = null
+  const roundUsages: Promise<GatewayUsage>[] = []
+
+  for (let round = 0; round < 2; round++) {
+    const finalRound = round === 1
+    const upstream = await fetchGatewayStream(accountId, apiToken, metadata, {
+      system,
+      messages,
+      ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [CREATE_DOCUMENT_TOOL], tool_choice: { type: 'auto' } }),
+    })
+    if (gatewayLogId === null) gatewayLogId = readGatewayLogId(upstream.headers)
+
+    const [decisionBranch, usageBranch] = upstream.body!.tee()
+    roundUsages.push(readGatewayUsage(usageBranch))
+    const peek = await peekFirstContentBlock(decisionBranch)
+
+    if (peek.kind === 'passthrough') {
+      const usage = Promise.all(roundUsages).then((all) => all.reduce(addUsage, ZERO_USAGE))
+      return {
+        response: new Response(buildPassthroughStream(peek), {
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        }),
+        usage,
+        gatewayLogId,
+      }
+    }
+
+    if (finalRound) {
+      // Should be unreachable — this round was requested with `tool_choice:
+      // { type: 'none' }`, Anthropic's own documented guarantee against a
+      // tool_use reply. Treat a violation as a hard Gateway error rather
+      // than loop forever or silently drop the tool call.
+      throw new GatewayError(502, 'Gateway returned tool_use despite tool_choice: none')
+    }
+
+    const input = await consumeToolUseRound(peek.reader, peek.decoder, peek.leftoverBuffer)
+    let toolResultContent: string
+    try {
+      const titleContent = input as { title?: unknown; content?: unknown }
+      if (typeof titleContent.title !== 'string' || typeof titleContent.content !== 'string') {
+        throw new Error('create_document tool input missing title/content')
+      }
+      const created = await executeCreateDocument({ title: titleContent.title, content: titleContent.content })
+      toolResultContent = `Document created with id=${created.document_id}.`
+    } catch (e) {
+      console.error('executeCreateDocument failed', e)
+      toolResultContent = 'Could not create the document due to an internal error.'
+    }
+
+    messages = [
+      ...messages,
+      { role: 'assistant', content: [{ type: 'tool_use', id: peek.contentBlock.id, name: peek.contentBlock.name, input }] },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: peek.contentBlock.id, content: toolResultContent }],
+      },
+    ]
+  }
+
+  // Unreachable (the loop above always returns or throws), but keeps the
+  // function's return type honest for TypeScript's control-flow analysis.
+  throw new GatewayError(502, 'tool-use round cap exhausted without a final answer')
+}
+
 /**
  * Proxy one chat turn to the Gateway. Returns the client-facing
  * `Response` (raw SSE passthrough — untouched, so a browser Anthropic SDK

@@ -190,6 +190,30 @@ export async function backfillCost(client: PoolClient, usageRowId: number, cost:
   await client.query('UPDATE ai_gateway_usage SET cost = $1 WHERE id = $2 AND cost IS NULL', [cost, usageRowId])
 }
 
+// PROJ-011/T-168 (T-164 §2) — the `create_document` tool executor. This
+// write runs on the plain admin connection (same `client` `chat.ts` already
+// has open via `withClient`), NOT the RLS-scoped `authenticated` role — the
+// admin connection bypasses RLS entirely, so this `assertFeatureEntitled`
+// call is the only gate on the write; it is load-bearing, not defensive
+// redundancy (the tool is only offered to `chat.ts` once
+// `isFeatureEntitled(..., 'personal_library')` already passed, but that read
+// could be stale by the time the tool actually executes inside the bounded
+// round-trip loop, so it's re-checked here, immediately before the write).
+export async function executeCreateDocument(
+  client: PoolClient,
+  traineeId: number,
+  traineeSub: string,
+  input: { title: string; content: string },
+): Promise<{ document_id: number }> {
+  await assertFeatureEntitled(client, traineeSub, 'personal_library')
+  const { rows } = await client.query<{ id: number }>(
+    `INSERT INTO library_document (trainee_id, title, content, created_by)
+     VALUES ($1, $2, $3, 'tutor') RETURNING id`,
+    [traineeId, input.title, input.content],
+  )
+  return { document_id: rows[0].id }
+}
+
 export class UnknownTraineeError extends Error {}
 
 /**

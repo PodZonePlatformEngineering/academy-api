@@ -20,14 +20,22 @@ import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
 import {
   resolveTraineeId,
   assertFeatureEntitled,
+  isFeatureEntitled,
   resolveActiveSubscriptionId,
   insertUsageRow,
   backfillCost,
+  executeCreateDocument,
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
 import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
-import { proxyToGateway, fetchGatewayLogCost, GatewayError, type ChatRequestBody } from '../../_lib/gateway'
+import {
+  proxyToGateway,
+  proxyToGatewayWithTools,
+  fetchGatewayLogCost,
+  GatewayError,
+  type ChatRequestBody,
+} from '../../_lib/gateway'
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
 
@@ -56,13 +64,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   let traineeId: number
   let subscriptionId: number | null
+  let hasLibraryAccess: boolean
   try {
     const gate = await withClient(env.NEON_DATABASE_URL, async (client) => {
       const resolvedTraineeId = await resolveTraineeId(client, traineeSub)
       await assertFeatureEntitled(client, traineeSub, 'inference')
+      // Second, cheap check in the same withClient block already resolving
+      // the inference gate above — no extra round trip (PROJ-011/T-168,
+      // T-164 §2). Only if true does the Gateway request include `tools` at
+      // all, so a non-entitled trainee's request is structurally tool-free.
+      const resolvedLibraryAccess = await isFeatureEntitled(client, traineeSub, 'personal_library')
       const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
       const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
-      return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, turnCount }
+      return {
+        traineeId: resolvedTraineeId,
+        subscriptionId: resolvedSubscriptionId,
+        hasLibraryAccess: resolvedLibraryAccess,
+        turnCount,
+      }
     })
     if (gate.turnCount >= MONTHLY_TURN_CAP) {
       // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
@@ -74,6 +93,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     traineeId = gate.traineeId
     subscriptionId = gate.subscriptionId
+    hasLibraryAccess = gate.hasLibraryAccess
   } catch (e) {
     if (e instanceof UnknownTraineeError) return json({ error: e.message }, 404, origin)
     if (e instanceof NotEntitled) return json({ error: e.message }, 403, origin)
@@ -82,12 +102,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   let gatewayResult: Awaited<ReturnType<typeof proxyToGateway>>
   try {
-    gatewayResult = await proxyToGateway(
-      env.CLOUDFLARE_ACCOUNT_ID,
-      env.CLOUDFLARE_API_TOKEN,
-      { trainee_id: traineeId, subscription_id: subscriptionId },
-      body,
-    )
+    const metadata = { trainee_id: traineeId, subscription_id: subscriptionId }
+    gatewayResult = hasLibraryAccess
+      ? await proxyToGatewayWithTools(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body, (input) =>
+          withClient(env.NEON_DATABASE_URL, (client) => executeCreateDocument(client, traineeId, traineeSub, input)),
+        )
+      : await proxyToGateway(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body)
   } catch (e) {
     if (e instanceof GatewayError) return json({ error: e.message }, 502, origin)
     throw e
