@@ -1,0 +1,105 @@
+// POST /api/tutor/chat — PROJ-011/T-158, Phase 3 build 1
+// (t157-inference-delivery-design.md). Platform-paid tutor inference for
+// ACTIVE subscribers, routed through Cloudflare AI Gateway instead of the
+// trainee's own BYOK Anthropic key (academy-frontend's existing free
+// channel, untouched — this route is new and additive).
+//
+// Order, per the design doc §1 + the operator's T-161 rate-limit decision
+// folded in 2026-08-03: JWT verify -> resolve trainee_id -> assertFeature-
+// Entitled('inference') -> 50-turn monthly cap check -> resolve the active
+// subscription.id -> proxy to the Gateway, stream back -> write the
+// synchronous half of ai_gateway_usage.
+//
+// No academy-frontend changes here (task 2 of the 3-brief breakdown,
+// t157-inference-delivery-design.md §5) — this route is deliberately
+// testable standalone against a real trainee JWT.
+import type { Env } from '../../_lib/env'
+import { corsHeaders, handleOptions, json } from '../../_lib/env'
+import { withClient } from '../../_lib/db'
+import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
+import {
+  resolveTraineeId,
+  assertFeatureEntitled,
+  resolveActiveSubscriptionId,
+  insertUsageRow,
+  UnknownTraineeError,
+  NotEntitled,
+} from '../../_lib/entitlement'
+import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
+import { proxyToGateway, GatewayError, type ChatRequestBody } from '../../_lib/gateway'
+
+export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
+
+export const onRequestPost: PagesFunction<Env> = async (context) => {
+  const { request, env } = context
+  const origin = request.headers.get('Origin')
+
+  let traineeSub: string
+  try {
+    traineeSub = await verifyTraineeSub(request.headers.get('Authorization'), env.STACK_PROJECT_ID)
+  } catch (e) {
+    if (e instanceof AuthError) return json({ error: e.message }, 401, origin)
+    throw e
+  }
+
+  let body: ChatRequestBody
+  try {
+    const parsed = JSON.parse(await request.text()) as Partial<ChatRequestBody>
+    if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+      return json({ error: 'messages required' }, 400, origin)
+    }
+    body = { system: parsed.system, messages: parsed.messages }
+  } catch {
+    return json({ error: 'invalid JSON body' }, 400, origin)
+  }
+
+  let traineeId: number
+  let subscriptionId: number | null
+  try {
+    const gate = await withClient(env.NEON_DATABASE_URL, async (client) => {
+      const resolvedTraineeId = await resolveTraineeId(client, traineeSub)
+      await assertFeatureEntitled(client, traineeSub, 'inference')
+      const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
+      const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
+      return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, turnCount }
+    })
+    if (gate.turnCount >= MONTHLY_TURN_CAP) {
+      // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
+      return json(
+        { error: `monthly turn cap reached (${MONTHLY_TURN_CAP} turns/calendar month)` },
+        429,
+        origin,
+      )
+    }
+    traineeId = gate.traineeId
+    subscriptionId = gate.subscriptionId
+  } catch (e) {
+    if (e instanceof UnknownTraineeError) return json({ error: e.message }, 404, origin)
+    if (e instanceof NotEntitled) return json({ error: e.message }, 403, origin)
+    throw e
+  }
+
+  let gatewayResult: Awaited<ReturnType<typeof proxyToGateway>>
+  try {
+    gatewayResult = await proxyToGateway(
+      env.CLOUDFLARE_ACCOUNT_ID,
+      env.CLOUDFLARE_API_TOKEN,
+      { trainee_id: traineeId, subscription_id: subscriptionId },
+      body,
+    )
+  } catch (e) {
+    if (e instanceof GatewayError) return json({ error: e.message }, 502, origin)
+    throw e
+  }
+
+  context.waitUntil(
+    (async () => {
+      const usage = await gatewayResult.usage
+      await withClient(env.NEON_DATABASE_URL, (client) => insertUsageRow(client, traineeId, subscriptionId, usage))
+    })().catch((e) => console.error('ai_gateway_usage write failed', e)),
+  )
+
+  const headers = new Headers(gatewayResult.response.headers)
+  for (const [k, v] of Object.entries(corsHeaders(origin))) headers.set(k, v)
+  return new Response(gatewayResult.response.body, { status: gatewayResult.response.status, headers })
+}

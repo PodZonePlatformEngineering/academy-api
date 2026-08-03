@@ -10,7 +10,6 @@
     "lint": "oxlint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.112.3",
     "@neondatabase/serverless": "^1.1.0",
     "jose": "^6.2.7"
   },
