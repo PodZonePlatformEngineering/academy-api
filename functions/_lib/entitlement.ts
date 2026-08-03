@@ -126,6 +126,51 @@ export async function assertFeatureEntitled(
   }
 }
 
+/**
+ * Resolve the trainee's currently-ACTIVE `subscription.id`, or `null` if
+ * none (shouldn't happen once `assertFeatureEntitled` has already passed,
+ * since `is_feature_entitled` requires an ACTIVE row itself, but this is a
+ * separate query so it's typed as optional rather than assumed). Runs on
+ * the plain admin connection, not the GUC-scoped `authenticated` role —
+ * `subscription` grants SELECT to `authenticated` too, but there's no
+ * per-trainee session to establish here since `traineeId` is already
+ * numeric; the admin role reads it directly (same pattern webhook.ts/
+ * subscription.ts already use for `subscription` writes).
+ */
+export async function resolveActiveSubscriptionId(
+  client: PoolClient,
+  traineeId: number,
+): Promise<number | null> {
+  const result = await client.query(
+    `SELECT id FROM subscription WHERE trainee_id = $1 AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1`,
+    [traineeId],
+  )
+  return result.rows[0]?.id ?? null
+}
+
+/**
+ * Synchronous half of the `ai_gateway_usage` write (t157-inference-delivery-
+ * design.md §3): everything the Gateway's Anthropic-schema response carries
+ * directly (`model`, token counts) is inserted immediately off the back of
+ * the same request that already opened this connection. `cost` and
+ * `gateway_log_id` are left NULL — they aren't in the inference response at
+ * all (Anthropic's own API doesn't return dollar cost), only in the
+ * Gateway's separate logs/analytics endpoint; backfilling them is T-158's
+ * task-3 follow-on, out of scope here.
+ */
+export async function insertUsageRow(
+  client: PoolClient,
+  traineeId: number,
+  subscriptionId: number | null,
+  usage: { model: string | null; inputTokens: number; outputTokens: number; cacheReadTokens: number },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO ai_gateway_usage (trainee_id, subscription_id, provider, model, tokens_in, tokens_out, cached_tokens_in)
+     VALUES ($1, $2, 'anthropic', $3, $4, $5, $6)`,
+    [traineeId, subscriptionId, usage.model, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens],
+  )
+}
+
 export class UnknownTraineeError extends Error {}
 
 /**

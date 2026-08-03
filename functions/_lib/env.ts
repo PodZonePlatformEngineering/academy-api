@@ -34,6 +34,16 @@ export interface Env {
    * Env-scoped, not hardcoded, so swapping to a real priced plan post-pilot
    * is a config change, not a code change. */
   PAYPAL_PLAN_ID: string
+  /** Cloudflare account id the `training-gateway` AI Gateway (T-150/T-157)
+   * lives under — the `{account_id}` path segment in the Gateway's
+   * `/ai/v1/messages` REST endpoint. Not a secret, but env-scoped like every
+   * other account identifier here (T-158). */
+  CLOUDFLARE_ACCOUNT_ID: string
+  /** Cloudflare API token authorized against the AI Gateway (T-150 §2 —
+   * `cloudflare-podzone-token`), sent as `Authorization: Bearer` (T-158's
+   * resolved SDK-auth-header question: the Gateway's `/ai/v1/messages`
+   * endpoint expects Bearer, not `X-Api-Key`). */
+  CLOUDFLARE_API_TOKEN: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
@@ -44,7 +54,7 @@ export interface Env {
 // the one origin this needs today.
 export const ALLOWED_ORIGINS: string[] = ['https://www.vibecreations.net']
 
-function corsHeaders(origin: string | null): Record<string, string> {
+export function corsHeaders(origin: string | null): Record<string, string> {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     return { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' }
   }
