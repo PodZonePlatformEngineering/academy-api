@@ -324,6 +324,67 @@ against each state: 49 rows -> `count = 49` (not blocked, correctly allows a
 (blocks the 51st turn). This is the cap's actual gating logic, proven
 against real Postgres, not just present in the code.
 
+## T-162 — Gateway model-id fix, live-caught then live-verified
+
+The JWT-minting gap above (`email_password.enabled: false`, OAuth-only) is
+a headless limitation, not an absolute one — with a real trainee doing the
+OAuth click-through and extracting the resulting Stack Auth Bearer token
+from the browser's Network tab (same operator-assisted pattern as
+`t157-inference-delivery-design.md`'s own account, established across
+T-141/T-145/T-152/T-153), a real request reached `/api/tutor/chat` all the
+way through JWT verify -> entitlement -> the 50-turn cap and hit the
+Gateway proxy itself, which 502'd: `"No such model: claude-sonnet-5"`.
+
+**Root cause, verified against current docs, not assumed**: Cloudflare's
+REST API docs (`developers.cloudflare.com/ai-gateway/usage/rest-api/`)
+confirm the unified `api.cloudflare.com/.../ai/v1/messages` endpoint —
+despite being labelled "Anthropic-SDK-compatible" — requires the
+`{provider}/{model}` prefixed form for `model`, the same convention as
+`/ai/run`. This is *not* the same as the older
+`gateway.ai.cloudflare.com/.../anthropic/v1/messages` endpoint, which does
+accept a bare id — the two endpoints' conventions genuinely differ, so the
+brief's instruction not to assume one carries over to the other was
+correct to insist on. Fix: `_lib/gateway.ts`'s `TUTOR_MODEL` changed from
+`'claude-sonnet-5'` to `'anthropic/claude-sonnet-5'` (commit `09cb579`,
+PR #3). Deployed to production the same way T-145 established (fresh
+`POST .../deployments` after merge, since Pages snapshots env/build state
+at deployment-creation time, not on every request) — confirmed via the
+Cloudflare API that deployment `2763e617` (commit `09cb579`) is the live
+production deployment.
+
+**Live-verified end-to-end** with a second operator-provided Bearer token
+(same extraction loop, ~5 minutes): `POST /api/tutor/chat` with
+`{"messages":[{"role":"user","content":"Say the single word: pong"}]}` ->
+`200`, real Anthropic SSE framing (`message_start` -> `content_block_delta`
+x2 -> `message_stop`), and the actual assistant text came back
+(`"p"` + `"ong"` deltas) — not just "no error this time." The fix is
+confirmed correct against a real Gateway call, not just against docs.
+
+### §4 — does the failed 502'd call's usage write need correcting?
+
+**No correction needed, confirmed by direct evidence, not just by reading
+the code**: queried `ai_gateway_usage` for every row in the table before
+running the live-verification request above — zero rows existed. The
+502'd request that caught this bug never wrote a usage row at all, despite
+the brief's working assumption that it had.
+
+The reason is structural, not incidental: `chat.ts` only registers the
+`context.waitUntil` background write (`insertUsageRow`) *after*
+`proxyToGateway` returns successfully (`chat.ts` lines ~82-100).
+`proxyToGateway` (`_lib/gateway.ts`) throws `GatewayError` as soon as it
+sees `!upstream.ok`, before it ever tees the body or constructs the
+`usage` promise — so a Gateway-side failure unwinds straight to `chat.ts`'s
+`catch` block and a `502` response, never reaching the write path. The
+50-turn cap is therefore also correctly unaffected by a failed call: a
+turn that never produced a real answer doesn't consume any of the
+trainee's 50, because nothing gets written to count.
+
+Running the live-verification request above and re-querying confirmed the
+other half of this: a *successful* call does write exactly one row
+(`trainee_id: 5, subscription_id: 1, model: "claude-sonnet-5", tokens_in:
+14, tokens_out: 4`) — the write path works correctly when it's supposed to
+fire, and correctly doesn't when it isn't.
+
 ## Testing — what's covered, what's genuinely blocked
 
 Per the brief's §5 (T-151) and this update (T-152): parsing and the
