@@ -32,6 +32,7 @@ import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
 import {
   proxyToGateway,
   proxyToGatewayWithTools,
+  createDocumentToolOffer,
   fetchGatewayLogCost,
   GatewayError,
   type ChatRequestBody,
@@ -104,8 +105,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const metadata = { trainee_id: traineeId, subscription_id: subscriptionId }
     gatewayResult = hasLibraryAccess
-      ? await proxyToGatewayWithTools(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body, (input) =>
-          withClient(env.NEON_DATABASE_URL, (client) => executeCreateDocument(client, traineeId, traineeSub, input)),
+      ? await proxyToGatewayWithTools(
+          env.CLOUDFLARE_ACCOUNT_ID,
+          env.CLOUDFLARE_API_TOKEN,
+          metadata,
+          body,
+          createDocumentToolOffer((input) =>
+            withClient(env.NEON_DATABASE_URL, (client) => executeCreateDocument(client, traineeId, traineeSub, input)),
+          ),
         )
       : await proxyToGateway(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body)
   } catch (e) {

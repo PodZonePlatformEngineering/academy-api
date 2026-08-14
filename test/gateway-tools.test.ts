@@ -8,7 +8,7 @@
 // (3) the entitlement re-check inside `executeCreateDocument` is the thing
 // that actually blocks a write, not just present in the code.
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { proxyToGatewayWithTools } from '../functions/_lib/gateway'
+import { proxyToGatewayWithTools, createDocumentToolOffer } from '../functions/_lib/gateway'
 
 function sseChunk(events: Array<Record<string, unknown>>): string {
   return events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('')
@@ -99,7 +99,7 @@ describe('proxyToGatewayWithTools', () => {
       'token',
       { trainee_id: 1, subscription_id: 2 },
       { system: 'be helpful', messages: [{ role: 'user', content: 'hi' }] },
-      executeCreateDocument,
+      createDocumentToolOffer(executeCreateDocument),
     )
 
     const text = await readAllText(result.response)
@@ -122,7 +122,7 @@ describe('proxyToGatewayWithTools', () => {
       'token',
       { trainee_id: 1, subscription_id: null },
       { system: 'be helpful', messages: [{ role: 'user', content: 'what is the answer?' }] },
-      executeCreateDocument,
+      createDocumentToolOffer(executeCreateDocument),
     )
 
     const text = await readAllText(result.response)
@@ -151,7 +151,7 @@ describe('proxyToGatewayWithTools', () => {
       'token',
       { trainee_id: 1, subscription_id: 2 },
       { system: 'be helpful', messages: [{ role: 'user', content: 'save a note' }] },
-      executeCreateDocument,
+      createDocumentToolOffer(executeCreateDocument),
     )
 
     const text = await readAllText(result.response)
@@ -195,7 +195,7 @@ describe('proxyToGatewayWithTools', () => {
       'token',
       { trainee_id: 1, subscription_id: null },
       { system: 'be helpful', messages: [{ role: 'user', content: 'save a note' }] },
-      executeCreateDocument,
+      createDocumentToolOffer(executeCreateDocument),
     )
 
     const text = await readAllText(result.response)
@@ -220,7 +220,7 @@ describe('proxyToGatewayWithTools', () => {
       'token',
       { trainee_id: 1, subscription_id: null },
       { system: 'be helpful', messages: [{ role: 'user', content: 'save a note' }] },
-      executeCreateDocument,
+      createDocumentToolOffer(executeCreateDocument),
     )
 
     const text = await readAllText(result.response)
@@ -247,7 +247,7 @@ describe('proxyToGatewayWithTools', () => {
         system: [{ type: 'text', text: 'client system prompt', cache_control: { type: 'ephemeral', ttl: '1h' } }],
         messages: [{ role: 'user', content: 'hi' }],
       },
-      vi.fn(),
+      createDocumentToolOffer(vi.fn()),
     )
   })
 })

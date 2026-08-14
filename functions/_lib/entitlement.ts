@@ -94,6 +94,7 @@ export type Feature =
   | 'cohort_community'
   | 'bookmarks'
   | 'personal_library'
+  | 'examination' // PROJ-011/T-214 — academy-admin migration 056
 
 export async function isFeatureEntitled(
   client: PoolClient,
@@ -212,6 +213,38 @@ export async function executeCreateDocument(
     [traineeId, input.title, input.content],
   )
   return { document_id: rows[0].id }
+}
+
+// PROJ-011/T-214 — the record_examiner_verdict tool executor (design doc
+// §3.2, mirrors executeCreateDocument's shape exactly). Runs on the plain
+// admin connection (bypasses RLS), so the enrolment-ownership check here is
+// load-bearing, not defensive redundancy — the same "re-check immediately
+// before the write" posture executeCreateDocument already takes with
+// assertFeatureEntitled. academy.record_examiner_verdict itself additionally
+// validates the criteria/passed shape server-side (056) — this function does
+// not duplicate that, only the ownership check, which the SQL function has
+// no way to perform (it isn't given traineeId).
+export class ForbiddenEnrolmentError extends Error {}
+
+export async function executeRecordExaminerVerdict(
+  client: PoolClient,
+  traineeId: number,
+  enrolmentId: number,
+  input: { module_id: string; passed: boolean; criteria: unknown; overall_rationale?: string },
+  tutorSessionId: number,
+): Promise<{ attestation_id: number }> {
+  const owns = await client.query(`SELECT 1 FROM enrolment WHERE id = $1 AND trainee_id = $2`, [
+    enrolmentId,
+    traineeId,
+  ])
+  if (owns.rows.length === 0) {
+    throw new ForbiddenEnrolmentError(`trainee ${traineeId} does not own enrolment ${enrolmentId}`)
+  }
+  const { rows } = await client.query<{ record_examiner_verdict: number }>(
+    `SELECT academy.record_examiner_verdict($1, $2, $3, $4, $5) AS record_examiner_verdict`,
+    [enrolmentId, input.module_id, tutorSessionId, input.passed, JSON.stringify(input.criteria)],
+  )
+  return { attestation_id: rows[0].record_examiner_verdict }
 }
 
 export class UnknownTraineeError extends Error {}
