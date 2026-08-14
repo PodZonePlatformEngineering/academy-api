@@ -167,15 +167,56 @@ export const CREATE_DOCUMENT_TOOL = {
   },
 } as const
 
-// The design's enforcement mechanism for the text-first-vs-tool-first binary
-// the peek logic depends on: a soft (prompted) convention, not a hard
-// protocol guarantee — see the honest-limitations note on
-// `peekFirstContentBlock` below for what happens if the model ever breaks it.
-const TOOL_USE_CONVENTION =
+const CREATE_DOCUMENT_TOOL_CONVENTION =
   'You have a create_document tool that saves a document to the ' +
   "trainee's personal library. If you decide to call it, call it " +
   'immediately with no preceding commentary — explain what you did in ' +
   'your next reply, after the tool result comes back.'
+
+// PROJ-011/T-214 — a second tool offered by the same interception loop
+// (design doc §3.2: "reuse this exact mechanism... rather than inventing a
+// second way to get a privileged write out of an LLM turn"). Offered only by
+// the Examiner route (api/examiner/chat.ts), never api/tutor/chat.ts.
+export const RECORD_EXAMINER_VERDICT_TOOL = {
+  name: 'record_examiner_verdict',
+  description: 'Record the final pass/fail verdict for this examination. Call exactly once, at the end of the exam.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      module_id: { type: 'string' },
+      passed: { type: 'boolean' },
+      criteria: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            met: { type: 'boolean' },
+            rationale: { type: 'string' },
+          },
+          required: ['name', 'met', 'rationale'],
+        },
+      },
+      overall_rationale: { type: 'string' },
+    },
+    required: ['module_id', 'passed', 'criteria', 'overall_rationale'],
+  },
+} as const
+
+const RECORD_EXAMINER_VERDICT_TOOL_CONVENTION =
+  'You have a record_examiner_verdict tool. Work through this module’s ' +
+  'rubric criteria across the conversation; when you are ready to render a ' +
+  'final pass/fail verdict, call the tool exactly once with no preceding ' +
+  'commentary — the tool call is the verdict of record, not any text you ' +
+  'write. Do not announce a verdict in chat text before calling it.'
+
+export type ToolName = typeof CREATE_DOCUMENT_TOOL.name | typeof RECORD_EXAMINER_VERDICT_TOOL.name
+
+export interface ToolOffer {
+  tool: { name: string; description: string; input_schema: Record<string, unknown> }
+  convention: string
+  execute: (input: unknown) => Promise<string>
+}
 
 /**
  * Append the tool-use convention as an extra system block, never mutate the
@@ -184,8 +225,8 @@ const TOOL_USE_CONVENTION =
  * cached prefix is unchanged, this is new uncached content tacked onto the
  * end, not a rewrite of the cached content.
  */
-function withToolConvention(system: unknown): unknown {
-  const appendix = { type: 'text', text: TOOL_USE_CONVENTION }
+function withToolConvention(system: unknown, convention: string): unknown {
+  const appendix = { type: 'text', text: convention }
   if (Array.isArray(system)) return [...system, appendix]
   if (typeof system === 'string') return [{ type: 'text', text: system }, appendix]
   return [appendix]
@@ -394,9 +435,9 @@ export async function proxyToGatewayWithTools(
   apiToken: string,
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
-  executeCreateDocument: (input: { title: string; content: string }) => Promise<{ document_id: number }>,
+  offer: ToolOffer,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
-  const system = withToolConvention(body.system)
+  const system = withToolConvention(body.system, offer.convention)
   let messages = body.messages
   let gatewayLogId: string | null = null
   const roundUsages: Promise<GatewayUsage>[] = []
@@ -406,7 +447,7 @@ export async function proxyToGatewayWithTools(
     const upstream = await fetchGatewayStream(accountId, apiToken, metadata, {
       system,
       messages,
-      ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [CREATE_DOCUMENT_TOOL], tool_choice: { type: 'auto' } }),
+      ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [offer.tool], tool_choice: { type: 'auto' } }),
     })
     if (gatewayLogId === null) gatewayLogId = readGatewayLogId(upstream.headers)
 
@@ -436,15 +477,10 @@ export async function proxyToGatewayWithTools(
     const input = await consumeToolUseRound(peek.reader, peek.decoder, peek.leftoverBuffer)
     let toolResultContent: string
     try {
-      const titleContent = input as { title?: unknown; content?: unknown }
-      if (typeof titleContent.title !== 'string' || typeof titleContent.content !== 'string') {
-        throw new Error('create_document tool input missing title/content')
-      }
-      const created = await executeCreateDocument({ title: titleContent.title, content: titleContent.content })
-      toolResultContent = `Document created with id=${created.document_id}.`
+      toolResultContent = await offer.execute(input)
     } catch (e) {
-      console.error('executeCreateDocument failed', e)
-      toolResultContent = 'Could not create the document due to an internal error.'
+      console.error(`${offer.tool.name} tool execution failed`, e)
+      toolResultContent = `Could not complete ${offer.tool.name} due to an internal error.`
     }
 
     messages = [
@@ -460,6 +496,69 @@ export async function proxyToGatewayWithTools(
   // Unreachable (the loop above always returns or throws), but keeps the
   // function's return type honest for TypeScript's control-flow analysis.
   throw new GatewayError(502, 'tool-use round cap exhausted without a final answer')
+}
+
+/** `ToolOffer` for T-168's create_document tool — the reference implementation
+ * this loop was built for. `executeCreateDocument` already validates/throws
+ * on bad input, same contract `execute` needs. */
+export function createDocumentToolOffer(
+  executeCreateDocument: (input: { title: string; content: string }) => Promise<{ document_id: number }>,
+): ToolOffer {
+  return {
+    tool: CREATE_DOCUMENT_TOOL,
+    convention: CREATE_DOCUMENT_TOOL_CONVENTION,
+    execute: async (input) => {
+      const titleContent = input as { title?: unknown; content?: unknown }
+      if (typeof titleContent.title !== 'string' || typeof titleContent.content !== 'string') {
+        throw new Error('create_document tool input missing title/content')
+      }
+      const created = await executeCreateDocument({ title: titleContent.title, content: titleContent.content })
+      return `Document created with id=${created.document_id}.`
+    },
+  }
+}
+
+// PROJ-011/T-214 — `ToolOffer` for record_examiner_verdict (design doc §3.2:
+// "do not forward the tool_use block to the client as visible content";
+// step 4, "tool_result back to the model, tool_choice: none for the final
+// round, so the trainee sees a closing message as plain streamed text, not
+// raw tool JSON" — that closing-message shape is exactly what this ToolOffer,
+// plugged into the same two-round loop createDocumentToolOffer uses, gives
+// for free).
+export function recordExaminerVerdictToolOffer(
+  executeVerdict: (input: {
+    module_id: string
+    passed: boolean
+    criteria: unknown
+    overall_rationale?: string
+  }) => Promise<{ attestation_id: number }>,
+): ToolOffer {
+  return {
+    tool: RECORD_EXAMINER_VERDICT_TOOL,
+    convention: RECORD_EXAMINER_VERDICT_TOOL_CONVENTION,
+    execute: async (input) => {
+      const verdict = input as {
+        module_id?: unknown
+        passed?: unknown
+        criteria?: unknown
+        overall_rationale?: unknown
+      }
+      if (
+        typeof verdict.module_id !== 'string' ||
+        typeof verdict.passed !== 'boolean' ||
+        !Array.isArray(verdict.criteria)
+      ) {
+        throw new Error('record_examiner_verdict tool input missing module_id/passed/criteria')
+      }
+      const result = await executeVerdict({
+        module_id: verdict.module_id,
+        passed: verdict.passed,
+        criteria: verdict.criteria,
+        overall_rationale: typeof verdict.overall_rationale === 'string' ? verdict.overall_rationale : undefined,
+      })
+      return `Verdict recorded (attestation id=${result.attestation_id}): ${verdict.passed ? 'passed' : 'not passed'}.`
+    },
+  }
 }
 
 /**

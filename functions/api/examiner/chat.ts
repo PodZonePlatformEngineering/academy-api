@@ -1,0 +1,157 @@
+// POST /api/examiner/chat — PROJ-011/T-214 Wave A §3.2/§7.3. Server-verified,
+// LLM-judged understanding check ("Examiner"), distinct from the Teacher
+// (`api/tutor/chat.ts`). A new route, not a body flag on the existing one —
+// design doc §7.3's own reasoning: `chat.ts` has no tool-use offering for the
+// base call at all (only the library-document path uses
+// proxyToGatewayWithTools), and stacking a second, independent tool-offering
+// condition onto that handler is exactly the implicit-branching complexity a
+// second, small, dedicated route avoids.
+//
+// Order mirrors chat.ts: JWT verify -> resolve trainee_id -> assertFeature-
+// Entitled('examination') -> shared 50-turn/month cap check (brief decision
+// 2: exam turns are NOT independently capped — they share ai_gateway_usage
+// with the Teacher, so countMonthlyTurns already counts both without any
+// extra wiring) -> resolve the active subscription.id -> proxy to the
+// Gateway with RECORD_EXAMINER_VERDICT_TOOL offered -> stream back -> write
+// the synchronous half of ai_gateway_usage (same table, same cap accounting).
+//
+// tutor_session_id/enrolment_id/module_id are supplied by the client
+// (academy-frontend opens tutor_session with mode='examine' itself — same
+// client-writable INSERT the Teacher path already uses, 008's
+// tutor_session_self policy) — this route re-validates enrolment ownership
+// server-side immediately before the privileged write
+// (executeRecordExaminerVerdict), the same "never trust a stale client-side
+// check" posture executeCreateDocument already takes for personal_library.
+import type { Env } from '../../_lib/env'
+import { corsHeaders, handleOptions, json } from '../../_lib/env'
+import { withClient } from '../../_lib/db'
+import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
+import {
+  resolveTraineeId,
+  assertFeatureEntitled,
+  resolveActiveSubscriptionId,
+  insertUsageRow,
+  backfillCost,
+  executeRecordExaminerVerdict,
+  ForbiddenEnrolmentError,
+  UnknownTraineeError,
+  NotEntitled,
+} from '../../_lib/entitlement'
+import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
+import {
+  proxyToGatewayWithTools,
+  recordExaminerVerdictToolOffer,
+  fetchGatewayLogCost,
+  GatewayError,
+  type ChatRequestBody,
+} from '../../_lib/gateway'
+
+interface ExaminerChatRequestBody extends ChatRequestBody {
+  enrolment_id: number
+  tutor_session_id: number
+}
+
+export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
+
+export const onRequestPost: PagesFunction<Env> = async (context) => {
+  const { request, env } = context
+  const origin = request.headers.get('Origin')
+
+  let traineeSub: string
+  try {
+    traineeSub = await verifyTraineeSub(request.headers.get('Authorization'), env.STACK_PROJECT_ID)
+  } catch (e) {
+    if (e instanceof AuthError) return json({ error: e.message }, 401, origin)
+    throw e
+  }
+
+  let body: ExaminerChatRequestBody
+  try {
+    const parsed = JSON.parse(await request.text()) as Partial<ExaminerChatRequestBody>
+    if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+      return json({ error: 'messages required' }, 400, origin)
+    }
+    if (typeof parsed.enrolment_id !== 'number' || typeof parsed.tutor_session_id !== 'number') {
+      return json({ error: 'enrolment_id and tutor_session_id (numbers) required' }, 400, origin)
+    }
+    body = {
+      system: parsed.system,
+      messages: parsed.messages,
+      enrolment_id: parsed.enrolment_id,
+      tutor_session_id: parsed.tutor_session_id,
+    }
+  } catch {
+    return json({ error: 'invalid JSON body' }, 400, origin)
+  }
+
+  let traineeId: number
+  let subscriptionId: number | null
+  try {
+    const gate = await withClient(env.NEON_DATABASE_URL, async (client) => {
+      const resolvedTraineeId = await resolveTraineeId(client, traineeSub)
+      await assertFeatureEntitled(client, traineeSub, 'examination')
+      const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
+      const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
+      return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, turnCount }
+    })
+    if (gate.turnCount >= MONTHLY_TURN_CAP) {
+      // Shared with the Teacher (brief decision 2) — ai_gateway_usage rows
+      // from either route count toward the same cap, no separate exam quota.
+      return json(
+        { error: `monthly turn cap reached (${MONTHLY_TURN_CAP} turns/calendar month, shared with the Teacher)` },
+        429,
+        origin,
+      )
+    }
+    traineeId = gate.traineeId
+    subscriptionId = gate.subscriptionId
+  } catch (e) {
+    if (e instanceof UnknownTraineeError) return json({ error: e.message }, 404, origin)
+    if (e instanceof NotEntitled) return json({ error: e.message }, 403, origin)
+    throw e
+  }
+
+  let gatewayResult: Awaited<ReturnType<typeof proxyToGatewayWithTools>>
+  try {
+    const metadata = { trainee_id: traineeId, subscription_id: subscriptionId }
+    gatewayResult = await proxyToGatewayWithTools(
+      env.CLOUDFLARE_ACCOUNT_ID,
+      env.CLOUDFLARE_API_TOKEN,
+      metadata,
+      body,
+      recordExaminerVerdictToolOffer((input) =>
+        withClient(env.NEON_DATABASE_URL, (client) =>
+          executeRecordExaminerVerdict(client, traineeId, body.enrolment_id, input, body.tutor_session_id),
+        ),
+      ),
+    )
+  } catch (e) {
+    if (e instanceof ForbiddenEnrolmentError) return json({ error: e.message }, 403, origin)
+    if (e instanceof GatewayError) return json({ error: e.message }, 502, origin)
+    throw e
+  }
+
+  context.waitUntil(
+    (async () => {
+      const usage = await gatewayResult.usage
+      const gatewayLogId = gatewayResult.gatewayLogId
+      const rowId = await withClient(env.NEON_DATABASE_URL, (client) =>
+        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId),
+      )
+      if (gatewayLogId) {
+        for (const delayMs of [0, 1500, 3000]) {
+          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
+          const cost = await fetchGatewayLogCost(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_LOGS_TOKEN, gatewayLogId)
+          if (cost !== null) {
+            await withClient(env.NEON_DATABASE_URL, (client) => backfillCost(client, rowId, cost))
+            break
+          }
+        }
+      }
+    })().catch((e) => console.error('ai_gateway_usage write failed (examiner)', e)),
+  )
+
+  const headers = new Headers(gatewayResult.response.headers)
+  for (const [k, v] of Object.entries(corsHeaders(origin))) headers.set(k, v)
+  return new Response(gatewayResult.response.body, { status: gatewayResult.response.status, headers })
+}
