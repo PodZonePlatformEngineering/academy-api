@@ -22,13 +22,14 @@ import {
   assertFeatureEntitled,
   isFeatureEntitled,
   resolveActiveSubscriptionId,
+  resolveActiveAccessToken,
   insertUsageRow,
   backfillCost,
   executeCreateDocument,
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
+import { countMonthlyTurns, countTokenTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
 import {
   proxyToGateway,
   proxyToGatewayWithTools,
@@ -65,6 +66,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   let traineeId: number
   let subscriptionId: number | null
+  let accessTokenId: number | null
   let hasLibraryAccess: boolean
   try {
     const gate = await withClient(env.NEON_DATABASE_URL, async (client) => {
@@ -76,24 +78,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // all, so a non-entitled trainee's request is structurally tool-free.
       const resolvedLibraryAccess = await isFeatureEntitled(client, traineeSub, 'personal_library')
       const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
-      const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
+      // PROJ-011/ACP-222 — a token, not a subscription, may be what granted
+      // the assertFeatureEntitled check above. A token doesn't stack with
+      // the flat subscription cap: its own turn_quota replaces
+      // MONTHLY_TURN_CAP entirely for a token-holder (design note in
+      // academy-admin migration 064).
+      const resolvedAccessToken = await resolveActiveAccessToken(client, resolvedTraineeId)
+      const turnCount = resolvedAccessToken
+        ? await countTokenTurns(client, resolvedAccessToken.id)
+        : await countMonthlyTurns(client, resolvedTraineeId)
+      const turnCap = resolvedAccessToken ? resolvedAccessToken.turnQuota : MONTHLY_TURN_CAP
       return {
         traineeId: resolvedTraineeId,
         subscriptionId: resolvedSubscriptionId,
+        accessTokenId: resolvedAccessToken?.id ?? null,
         hasLibraryAccess: resolvedLibraryAccess,
         turnCount,
+        turnCap,
       }
     })
-    if (gate.turnCount >= MONTHLY_TURN_CAP) {
+    if (gate.turnCount >= gate.turnCap) {
       // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
-      return json(
-        { error: `monthly turn cap reached (${MONTHLY_TURN_CAP} turns/calendar month)` },
-        429,
-        origin,
-      )
+      const capDescription = gate.accessTokenId
+        ? `token turn cap reached (${gate.turnCap} turns)`
+        : `monthly turn cap reached (${gate.turnCap} turns/calendar month)`
+      return json({ error: capDescription }, 429, origin)
     }
     traineeId = gate.traineeId
     subscriptionId = gate.subscriptionId
+    accessTokenId = gate.accessTokenId
     hasLibraryAccess = gate.hasLibraryAccess
   } catch (e) {
     if (e instanceof UnknownTraineeError) return json({ error: e.message }, 404, origin)
@@ -125,7 +138,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const usage = await gatewayResult.usage
       const gatewayLogId = gatewayResult.gatewayLogId
       const rowId = await withClient(env.NEON_DATABASE_URL, (client) =>
-        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId),
+        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId, accessTokenId),
       )
       // Async half (T-160): cost isn't on the inference response, only on
       // the Gateway's logs endpoint, and that endpoint's indexing lags the
