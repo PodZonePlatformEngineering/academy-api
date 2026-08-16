@@ -57,9 +57,20 @@ export interface Env {
 // webhook route never needs this (PayPal's servers send no Origin header,
 // and signature verification — not CORS — is the actual trust boundary for
 // that route) — but POST /api/paypal/subscriptions (T-152) is browser-facing
-// from academy-frontend, deployed at vibecreations.net (T-153), so that's
-// the one origin this needs today.
-export const ALLOWED_ORIGINS: string[] = ['https://www.vibecreations.net']
+// from academy-frontend, deployed at vibecreations.net (T-153) — both the
+// apex and www hosts serve the site live (academy-frontend-vibe's Pages
+// domains: vibecreations.net, www.vibecreations.net), so both must be
+// listed or a bare-apex visitor's requests silently CORS-fail with no
+// error detail beyond "Failed to fetch" (academy-frontend#64, 2026-08-16 —
+// confirmed live via a captured OPTIONS preflight whose Origin was the bare
+// apex, which this list didn't match). academy-frontend-vibe.pages.dev
+// added too, matching academy-web's own ALLOWED_ORIGINS convention of also
+// listing the raw .pages.dev project URL for direct testing.
+export const ALLOWED_ORIGINS: string[] = [
+  'https://vibecreations.net',
+  'https://www.vibecreations.net',
+  'https://academy-frontend-vibe.pages.dev',
+]
 
 export function corsHeaders(origin: string | null): Record<string, string> {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
