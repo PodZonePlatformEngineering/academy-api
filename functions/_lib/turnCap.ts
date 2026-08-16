@@ -24,3 +24,17 @@ export async function countMonthlyTurns(client: PoolClient, traineeId: number): 
   )
   return Number(result.rows[0]?.count ?? 0)
 }
+
+/**
+ * PROJ-011/ACP-222 — turns already used against a redeemed `access_token`.
+ * Unlike `countMonthlyTurns`, not scoped to the calendar month: a token's
+ * `turn_quota` is a fixed lifetime budget (academy-admin migration 064),
+ * not a recurring one, so every row against `accessTokenId` counts.
+ */
+export async function countTokenTurns(client: PoolClient, accessTokenId: number): Promise<number> {
+  const result = await client.query(
+    `SELECT count(*)::int AS count FROM ai_gateway_usage WHERE access_token_id = $1`,
+    [accessTokenId],
+  )
+  return Number(result.rows[0]?.count ?? 0)
+}

@@ -150,6 +150,25 @@ export async function resolveActiveSubscriptionId(
 }
 
 /**
+ * PROJ-011/ACP-222 — the trainee's own redeemed `access_token`, if any (a
+ * trainee can hold at most one, ever — academy-admin migration 064's
+ * `access_token_redeemed_by_trainee_id_key`). Same plain-admin-connection
+ * posture as `resolveActiveSubscriptionId`: `traineeId` is already a
+ * resolved, verified numeric id, no per-trainee GUC session needed.
+ */
+export async function resolveActiveAccessToken(
+  client: PoolClient,
+  traineeId: number,
+): Promise<{ id: number; turnQuota: number } | null> {
+  const result = await client.query<{ id: number; turn_quota: number }>(
+    `SELECT id, turn_quota FROM access_token WHERE redeemed_by_trainee_id = $1`,
+    [traineeId],
+  )
+  const row = result.rows[0]
+  return row ? { id: row.id, turnQuota: row.turn_quota } : null
+}
+
+/**
  * Synchronous half of the `ai_gateway_usage` write (t157-inference-delivery-
  * design.md §3): everything the Gateway's Anthropic-schema response carries
  * directly (`model`, token counts) is inserted immediately off the back of
@@ -173,12 +192,22 @@ export async function insertUsageRow(
   subscriptionId: number | null,
   usage: { model: string | null; inputTokens: number; outputTokens: number; cacheReadTokens: number },
   gatewayLogId: string | null,
+  accessTokenId: number | null = null,
 ): Promise<number> {
   const result = await client.query<{ id: number }>(
-    `INSERT INTO ai_gateway_usage (trainee_id, subscription_id, gateway_log_id, provider, model, tokens_in, tokens_out, cached_tokens_in)
-     VALUES ($1, $2, $3, 'anthropic', $4, $5, $6, $7)
+    `INSERT INTO ai_gateway_usage (trainee_id, subscription_id, access_token_id, gateway_log_id, provider, model, tokens_in, tokens_out, cached_tokens_in)
+     VALUES ($1, $2, $3, $4, 'anthropic', $5, $6, $7, $8)
      RETURNING id`,
-    [traineeId, subscriptionId, gatewayLogId, usage.model, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens],
+    [
+      traineeId,
+      subscriptionId,
+      accessTokenId,
+      gatewayLogId,
+      usage.model,
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.cacheReadTokens,
+    ],
   )
   return result.rows[0].id
 }
