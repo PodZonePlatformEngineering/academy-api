@@ -114,6 +114,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   let gatewayResult: Awaited<ReturnType<typeof proxyToGatewayWithTools>>
   try {
     const metadata = { trainee_id: traineeId, subscription_id: subscriptionId }
+    // PROJ-011/ACP-252 — see the matching comment in api/tutor/chat.ts.
+    const gatewayMode = env.GATEWAY_MODE === 'mock' ? 'mock' : 'real'
     gatewayResult = await proxyToGatewayWithTools(
       env.CLOUDFLARE_ACCOUNT_ID,
       env.CLOUDFLARE_API_TOKEN,
@@ -124,6 +126,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           executeRecordExaminerVerdict(client, traineeId, body.enrolment_id, input, body.tutor_session_id),
         ),
       ),
+      gatewayMode,
     )
   } catch (e) {
     if (e instanceof ForbiddenEnrolmentError) return json({ error: e.message }, 403, origin)
