@@ -51,6 +51,13 @@ export interface Env {
    * `ai_gateway_usage.cost`, which isn't present on the inference response
    * itself (Anthropic's schema has no dollar figure). */
   CLOUDFLARE_LOGS_TOKEN: string
+  /** PROJ-011/ACP-252 — QA cost-control switch (proposal §2.5). Unset (or
+   * any value other than 'mock') means "call the real Gateway", the
+   * existing production behaviour, unchanged by construction. Only the
+   * `academy-api-qa` Pages project sets this to 'mock', so
+   * `functions/_lib/gateway.ts` returns a canned SSE response instead of
+   * spending real Anthropic/Gateway tokens on QA traffic. */
+  GATEWAY_MODE?: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
@@ -70,6 +77,11 @@ export const ALLOWED_ORIGINS: string[] = [
   'https://vibecreations.net',
   'https://www.vibecreations.net',
   'https://academy-frontend-vibe.pages.dev',
+  // PROJ-011/ACP-252 — the QA app instance's own origin (proposal §2.4:
+  // "CORS scoped to exactly the QA app's origin"). Harmless to list
+  // alongside production origins here since this array is already a strict
+  // allowlist, not a wildcard.
+  'https://academy-frontend-qa.pages.dev',
 ]
 
 export function corsHeaders(origin: string | null): Record<string, string> {

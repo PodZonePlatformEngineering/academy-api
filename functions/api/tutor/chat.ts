@@ -117,6 +117,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   let gatewayResult: Awaited<ReturnType<typeof proxyToGateway>>
   try {
     const metadata = { trainee_id: traineeId, subscription_id: subscriptionId }
+    // PROJ-011/ACP-252 — 'mock' only when the deployment's own GATEWAY_MODE
+    // env var says so (the QA project); unset/anything else is 'real',
+    // identical to today's production behaviour.
+    const gatewayMode = env.GATEWAY_MODE === 'mock' ? 'mock' : 'real'
     gatewayResult = hasLibraryAccess
       ? await proxyToGatewayWithTools(
           env.CLOUDFLARE_ACCOUNT_ID,
@@ -126,8 +130,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           createDocumentToolOffer((input) =>
             withClient(env.NEON_DATABASE_URL, (client) => executeCreateDocument(client, traineeId, traineeSub, input)),
           ),
+          gatewayMode,
         )
-      : await proxyToGateway(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body)
+      : await proxyToGateway(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN, metadata, body, gatewayMode)
   } catch (e) {
     if (e instanceof GatewayError) return json({ error: e.message }, 502, origin)
     throw e

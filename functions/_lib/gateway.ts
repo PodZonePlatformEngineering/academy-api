@@ -242,12 +242,42 @@ function addUsage(a: GatewayUsage, b: GatewayUsage): GatewayUsage {
   }
 }
 
+export type GatewayMode = 'real' | 'mock'
+
+/**
+ * PROJ-011/ACP-252 — the QA cost-control mechanism (proposal §2.5): most QA
+ * test traffic should hit a mocked Gateway response rather than spend real
+ * Anthropic/Gateway tokens. Returns a hand-built SSE body shaped exactly
+ * like `fetchGatewayStream`'s real response — same event types
+ * `readGatewayUsage`/`peekFirstContentBlock` already parse — so callers
+ * downstream of this function (usage accounting, tool-use branching,
+ * client passthrough) don't need a separate code path for the mock case.
+ * No `cf-aig-log-id` header (there's no real Gateway log to reference);
+ * `readGatewayLogId` returning null for a mock call is correct, not a bug —
+ * `fetchGatewayLogCost` is never called with a null log id (chat.ts/
+ * examiner/chat.ts both guard on `if (gatewayLogId)`).
+ */
+function mockGatewayResponse(): Response {
+  const events = [
+    { type: 'message_start', message: { model: TUTOR_MODEL, usage: { input_tokens: 12, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '[QA mock Gateway response — GATEWAY_MODE=mock, no real Anthropic call was made.]' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 14 } },
+    { type: 'message_stop' },
+  ]
+  const body = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('')
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+}
+
 async function fetchGatewayStream(
   accountId: string,
   apiToken: string,
   metadata: { trainee_id: number; subscription_id: number | null },
   requestBody: Record<string, unknown>,
+  mode: GatewayMode = 'real',
 ): Promise<Response> {
+  if (mode === 'mock') return mockGatewayResponse()
   const upstream = await fetch(
     `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
     {
@@ -436,6 +466,7 @@ export async function proxyToGatewayWithTools(
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
   offer: ToolOffer,
+  mode: GatewayMode = 'real',
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
   const system = withToolConvention(body.system, offer.convention)
   let messages = body.messages
@@ -444,11 +475,17 @@ export async function proxyToGatewayWithTools(
 
   for (let round = 0; round < 2; round++) {
     const finalRound = round === 1
-    const upstream = await fetchGatewayStream(accountId, apiToken, metadata, {
-      system,
-      messages,
-      ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [offer.tool], tool_choice: { type: 'auto' } }),
-    })
+    const upstream = await fetchGatewayStream(
+      accountId,
+      apiToken,
+      metadata,
+      {
+        system,
+        messages,
+        ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [offer.tool], tool_choice: { type: 'auto' } }),
+      },
+      mode,
+    )
     if (gatewayLogId === null) gatewayLogId = readGatewayLogId(upstream.headers)
 
     const [decisionBranch, usageBranch] = upstream.body!.tee()
@@ -575,31 +612,9 @@ export async function proxyToGateway(
   apiToken: string,
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
+  mode: GatewayMode = 'real',
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
-  const upstream = await fetch(
-    `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'cf-aig-authorization': `Bearer ${apiToken}`,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-        'cf-aig-metadata': JSON.stringify(metadata),
-        // Cloudflare's edge WAF (error 1010) blocks requests with no/generic
-        // User-Agent on this endpoint — live-caught during T-163 verification.
-        'User-Agent': 'academy-api/1.0 (+academy-api.pages.dev)',
-      },
-      body: JSON.stringify({
-        model: TUTOR_MODEL,
-        max_tokens: TUTOR_MAX_TOKENS,
-        thinking: { type: 'adaptive' },
-        output_config: { effort: TUTOR_THINKING_EFFORT },
-        system: body.system,
-        messages: body.messages,
-        stream: true,
-      }),
-    },
-  )
+  const upstream = await fetchGatewayStream(accountId, apiToken, metadata, { system: body.system, messages: body.messages }, mode)
 
   if (!upstream.ok || !upstream.body) {
     throw new GatewayError(upstream.status, await upstream.text())

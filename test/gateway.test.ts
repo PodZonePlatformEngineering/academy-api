@@ -6,7 +6,7 @@
 // `/ai/v1/messages` endpoint is confirmed to re-emit unmodified (§2 of
 // t157-inference-delivery-design.md — "strictly Anthropic's API schema").
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { readGatewayUsage, readGatewayLogId, fetchGatewayLogCost } from '../functions/_lib/gateway'
+import { readGatewayUsage, readGatewayLogId, fetchGatewayLogCost, proxyToGateway } from '../functions/_lib/gateway'
 
 function sseStream(events: Array<{ type: string; data: Record<string, unknown> }>): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -100,5 +100,47 @@ describe('fetchGatewayLogCost', () => {
     )
     const cost = await fetchGatewayLogCost('acc123', 'logs-token', 'log123')
     expect(cost).toBeNull()
+  })
+})
+
+// PROJ-011/ACP-252 — the QA cost-control switch. `mode: 'mock'` must never
+// call `fetch` at all (that's the whole point — no real Gateway spend), and
+// must still produce a usage/gatewayLogId shape the caller's existing
+// accounting code (chat.ts/examiner/chat.ts) already handles unmodified.
+describe('proxyToGateway mock mode', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('never calls fetch and returns a well-formed SSE passthrough + usage', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const result = await proxyToGateway(
+      'acc123',
+      'token',
+      { trainee_id: 1, subscription_id: null },
+      { system: 'sys', messages: [{ role: 'user', content: 'hi' }] },
+      'mock',
+    )
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(result.gatewayLogId).toBeNull()
+    const usage = await result.usage
+    expect(usage.model).toBe('claude-sonnet-5')
+    expect(usage.outputTokens).toBeGreaterThan(0)
+    const text = await result.response.text()
+    expect(text).toContain('event: message_start')
+    expect(text).toContain('event: message_stop')
+  })
+
+  it('defaults to real mode (calls fetch) when mode is omitted', async () => {
+    const fetchSpy = vi.fn(async () => new Response('boom', { status: 500 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await expect(
+      proxyToGateway('acc123', 'token', { trainee_id: 1, subscription_id: null }, { system: 'sys', messages: [] }),
+    ).rejects.toThrow()
+    expect(fetchSpy).toHaveBeenCalled()
   })
 })
