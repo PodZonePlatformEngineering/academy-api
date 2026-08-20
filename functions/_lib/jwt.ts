@@ -9,7 +9,7 @@
 // academy-web's own VITE_STACK_PROJECT_ID build var). The verified `sub`
 // claim becomes `trainee_sub` — never a client-supplied body field, per the
 // brief.
-import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify } from 'jose'
+import { createRemoteJWKSet, jwtVerify } from 'jose'
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null
 let jwksProjectId: string | null = null
@@ -41,20 +41,6 @@ export async function verifyTraineeSub(
     return payload.sub
   } catch (e) {
     if (e instanceof AuthError) throw e
-    // TEMP diagnostic (ACP-408, 2026-08-20) — surface the token's own kid
-    // vs. what the JWKS actually served, since "no applicable key found"
-    // gives no detail otherwise. Revert once ACP-408 is root-caused.
-    let diag = ''
-    try {
-      const hdr = decodeProtectedHeader(token)
-      const jwksUrl = `https://api.stack-auth.com/api/v1/projects/${stackProjectId}/.well-known/jwks.json`
-      const res = await fetch(jwksUrl)
-      const body = (await res.json()) as { keys?: { kid?: string }[] }
-      const jwksKids = (body.keys ?? []).map((k) => k.kid)
-      diag = ` [diag: token.kid=${hdr.kid} token.alg=${hdr.alg} jwks.kids=${JSON.stringify(jwksKids)}]`
-    } catch (diagErr) {
-      diag = ` [diag failed: ${(diagErr as Error).message}]`
-    }
-    throw new AuthError(`token verification failed: ${(e as Error).message}${diag}`)
+    throw new AuthError(`token verification failed: ${(e as Error).message}`)
   }
 }
