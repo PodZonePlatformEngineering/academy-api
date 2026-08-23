@@ -29,7 +29,7 @@ import {
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countMonthlyTurns, countTokenTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
+import { countMonthlyTurns, countTokenTurns, resolveMonthlyTurnCap } from '../../_lib/turnCap'
 import {
   proxyToGateway,
   proxyToGatewayWithTools,
@@ -87,7 +87,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const turnCount = resolvedAccessToken
         ? await countTokenTurns(client, resolvedAccessToken.id)
         : await countMonthlyTurns(client, resolvedTraineeId)
-      const turnCap = resolvedAccessToken ? resolvedAccessToken.turnQuota : MONTHLY_TURN_CAP
+      const turnCap = resolvedAccessToken ? resolvedAccessToken.turnQuota : resolveMonthlyTurnCap(env)
       return {
         traineeId: resolvedTraineeId,
         subscriptionId: resolvedSubscriptionId,

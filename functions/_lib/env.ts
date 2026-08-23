@@ -58,6 +58,12 @@ export interface Env {
    * `functions/_lib/gateway.ts` returns a canned SSE response instead of
    * spending real Anthropic/Gateway tokens on QA traffic. */
   GATEWAY_MODE?: string
+  /** PROJ-011/ACP-409 follow-up — QA-only override of turnCap.ts's
+   * DEFAULT_MONTHLY_TURN_CAP (production's real 50/month). Unset means
+   * "use the default", production's existing behaviour, unchanged by
+   * construction. Only `academy-api-qa` sets this (to 5), so quota
+   * exhaustion is actually reachable in an e2e run. */
+  MONTHLY_TURN_CAP?: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
