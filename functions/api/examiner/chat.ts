@@ -37,7 +37,7 @@ import {
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countMonthlyTurns, MONTHLY_TURN_CAP } from '../../_lib/turnCap'
+import { countMonthlyTurns, resolveMonthlyTurnCap } from '../../_lib/turnCap'
 import {
   proxyToGatewayWithTools,
   recordExaminerVerdictToolOffer,
@@ -94,11 +94,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
       return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, turnCount }
     })
-    if (gate.turnCount >= MONTHLY_TURN_CAP) {
+    const monthlyTurnCap = resolveMonthlyTurnCap(env)
+    if (gate.turnCount >= monthlyTurnCap) {
       // Shared with the Teacher (brief decision 2) — ai_gateway_usage rows
       // from either route count toward the same cap, no separate exam quota.
       return json(
-        { error: `monthly turn cap reached (${MONTHLY_TURN_CAP} turns/calendar month, shared with the Teacher)` },
+        { error: `monthly turn cap reached (${monthlyTurnCap} turns/calendar month, shared with the Teacher)` },
         429,
         origin,
       )
