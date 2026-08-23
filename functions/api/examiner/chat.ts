@@ -128,6 +128,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ),
       ),
       gatewayMode,
+      env.GATEWAY_ID,
+      env.ANTHROPIC_API_KEY_QA,
     )
   } catch (e) {
     if (e instanceof ForbiddenEnrolmentError) return json({ error: e.message }, 403, origin)
@@ -145,7 +147,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       if (gatewayLogId) {
         for (const delayMs of [0, 1500, 3000]) {
           if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
-          const cost = await fetchGatewayLogCost(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_LOGS_TOKEN, gatewayLogId)
+          const cost = await fetchGatewayLogCost(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_LOGS_TOKEN, gatewayLogId, env.GATEWAY_ID)
           if (cost !== null) {
             await withClient(env.NEON_DATABASE_URL, (client) => backfillCost(client, rowId, cost))
             break

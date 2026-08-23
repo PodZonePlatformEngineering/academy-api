@@ -276,10 +276,12 @@ async function fetchGatewayStream(
   metadata: { trainee_id: number; subscription_id: number | null },
   requestBody: Record<string, unknown>,
   mode: GatewayMode = 'real',
+  gatewayId: string = TUTOR_GATEWAY_ID,
+  anthropicApiKey?: string,
 ): Promise<Response> {
   if (mode === 'mock') return mockGatewayResponse()
   const upstream = await fetch(
-    `https://gateway.ai.cloudflare.com/v1/${accountId}/${TUTOR_GATEWAY_ID}/anthropic/v1/messages`,
+    `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/anthropic/v1/messages`,
     {
       method: 'POST',
       headers: {
@@ -288,6 +290,12 @@ async function fetchGatewayStream(
         'Content-Type': 'application/json',
         'cf-aig-metadata': JSON.stringify(metadata),
         'User-Agent': 'academy-api/1.0 (+academy-api.pages.dev)',
+        // BYOK (QA cost-separation, 2026-08-24): when a real Anthropic key is
+        // supplied, sending it as `x-api-key` makes Cloudflare pass this
+        // request straight through to Anthropic under that key instead of
+        // Unified Billing — Anthropic then bills/reports it directly,
+        // distinct from production's Cloudflare-account spend.
+        ...(anthropicApiKey ? { 'x-api-key': anthropicApiKey } : {}),
       },
       body: JSON.stringify({
         model: TUTOR_MODEL,
@@ -467,6 +475,8 @@ export async function proxyToGatewayWithTools(
   body: ChatRequestBody,
   offer: ToolOffer,
   mode: GatewayMode = 'real',
+  gatewayId: string = TUTOR_GATEWAY_ID,
+  anthropicApiKey?: string,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
   const system = withToolConvention(body.system, offer.convention)
   let messages = body.messages
@@ -485,6 +495,8 @@ export async function proxyToGatewayWithTools(
         ...(finalRound ? { tool_choice: { type: 'none' } } : { tools: [offer.tool], tool_choice: { type: 'auto' } }),
       },
       mode,
+      gatewayId,
+      anthropicApiKey,
     )
     if (gatewayLogId === null) gatewayLogId = readGatewayLogId(upstream.headers)
 
@@ -613,8 +625,18 @@ export async function proxyToGateway(
   metadata: { trainee_id: number; subscription_id: number | null },
   body: ChatRequestBody,
   mode: GatewayMode = 'real',
+  gatewayId: string = TUTOR_GATEWAY_ID,
+  anthropicApiKey?: string,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
-  const upstream = await fetchGatewayStream(accountId, apiToken, metadata, { system: body.system, messages: body.messages }, mode)
+  const upstream = await fetchGatewayStream(
+    accountId,
+    apiToken,
+    metadata,
+    { system: body.system, messages: body.messages },
+    mode,
+    gatewayId,
+    anthropicApiKey,
+  )
 
   if (!upstream.ok || !upstream.body) {
     throw new GatewayError(upstream.status, await upstream.text())
@@ -643,9 +665,10 @@ export async function fetchGatewayLogCost(
   accountId: string,
   logsToken: string,
   logId: string,
+  gatewayId: string = TUTOR_GATEWAY_ID,
 ): Promise<number | null> {
   const resp = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${TUTOR_GATEWAY_ID}/logs/${logId}`,
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${gatewayId}/logs/${logId}`,
     { headers: { Authorization: `Bearer ${logsToken}` } },
   )
   if (!resp.ok) return null
