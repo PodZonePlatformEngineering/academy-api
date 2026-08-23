@@ -171,6 +171,51 @@ sandbox plan isn't reconstructable by guessing
   Cloudflare Pages env var, not hardcoded, so swapping to a real priced plan
   post-pilot is a config change).
 
+### App split: "Default" (QA) vs. "VibeCreations" (production) — ACP-411, 2026-08-24
+
+Until 2026-08-24, `academy-api` (production) and `academy-api-qa` shared the
+same PayPal sandbox app ("Default", the one above) — same
+`PAYPAL_CLIENT_ID`/`SECRET`/`PLAN_ID`, only the webhook subscription
+differed. ACP-410's audit flagged this as a real gap: if ACP-409's
+production live-cutover ever swapped `academy-api`'s credentials without
+QA getting its own app first, QA would lose its PayPal sandbox entirely.
+
+Fixed by splitting onto the operator's two existing PayPal Developer apps:
+**"Default" stays QA-only**, **"VibeCreations" becomes production's app.**
+Both are still sandbox — this is an app-identity split, not the live
+cutover itself (that's ACP-409, still open, tracked in the production
+release plan).
+
+New resources provisioned under the VibeCreations app (2026-08-24, same
+"record here since it isn't reconstructable by guessing" reasoning as
+above):
+
+- **Product**: `PROD-9DE034977F394463W` — same `SERVICE`/
+  `EDUCATIONAL_AND_TEXTBOOKS` shape as the Default app's product.
+- **Plan**: `P-3PY25649RR320045LNKFYPDI` — status `ACTIVE`, identical shape
+  to the Default app's plan (GBP 1.00/month placeholder, one regular
+  monthly cycle). `academy-api`'s `PAYPAL_PLAN_ID` now points here;
+  `academy-api-qa`'s is unchanged (still the Default app's
+  `P-6T4453632B555204CNJX4AAQ`).
+- **Webhook**: `4TK142903U503644J` → `academy-api.pages.dev/api/paypal/webhook`,
+  registered under the VibeCreations app (a webhook belongs to one app, not
+  one URL — the Default app's old production webhook,
+  `7S5206055D247271W`, is now orphaned: still registered, still pointed at
+  `academy-api.pages.dev`, but nothing looks it up anymore since production
+  no longer authenticates as the Default app. Left in place rather than
+  deleted — harmless, and trivially reproducible if ever needed).
+
+Live-verified end to end: `POST /v1/billing/subscriptions` against the new
+plan under the VibeCreations app's own OAuth token returned a real
+`APPROVAL_PENDING` subscription with a working sandbox approval link.
+
+**Still open (ACP-409, add to the production release plan)**: the operator
+has a real PayPal Business account to switch production to for the actual
+sandbox → live cutover. That's a distinct, much bigger step (real money,
+`PAYPAL_API_BASE` → `https://api-m.paypal.com`, a real priced plan
+replacing the GBP 1.00 placeholder) — this session only split the sandbox
+app identity so QA doesn't share whatever happens to production next.
+
 ## Inference route (`functions/api/tutor/chat.ts`, T-158)
 
 Phase 3 build 1 of `t157-inference-delivery-design.md` — platform-paid tutor
