@@ -64,6 +64,21 @@ export interface Env {
    * construction. Only `academy-api-qa` sets this (to 5), so quota
    * exhaustion is actually reachable in an e2e run. */
   MONTHLY_TURN_CAP?: string
+  /** PROJ-011 (2026-08-24) — QA cost-separation: overrides `TUTOR_GATEWAY_ID`
+   * ('training-gateway') with a second, dedicated Cloudflare AI Gateway
+   * (vibecreations-branded, e.g. 'vibecreations-qa-gateway') so QA's Gateway
+   * logs/analytics — and, once ANTHROPIC_API_KEY_QA is also set, its actual
+   * Anthropic spend — are never mixed into production's 'training-gateway'
+   * numbers. Only `academy-api-qa` sets this; unset elsewhere falls back to
+   * `TUTOR_GATEWAY_ID` unchanged. */
+  GATEWAY_ID?: string
+  /** PROJ-011 (2026-08-24) — a real Anthropic API key (BYOK), set only on
+   * `academy-api-qa`, paired with GATEWAY_ID above. Production never sets
+   * this and keeps using Cloudflare Unified Billing (CLOUDFLARE_API_TOKEN's
+   * `cf-aig-authorization` alone, no `x-api-key`) — Anthropic bills this
+   * key directly, so QA's Anthropic-side cost reporting reads separately
+   * from production's Cloudflare-account Unified Billing spend. */
+  ANTHROPIC_API_KEY_QA?: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal
