@@ -17,6 +17,7 @@ import type { Env } from '../../_lib/env'
 import { corsHeaders, handleOptions, json } from '../../_lib/env'
 import { withClient } from '../../_lib/db'
 import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
+import { verifyBetterAuthTraineeSub } from '../../_lib/betterAuthJwt'
 import {
   resolveTraineeId,
   assertFeatureEntitled,
@@ -47,7 +48,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   let traineeSub: string
   try {
-    traineeSub = await verifyTraineeSub(request.headers.get('Authorization'), env.STACK_PROJECT_ID)
+    traineeSub =
+      env.AUTH_PRODUCT === 'better-auth'
+        ? await verifyBetterAuthTraineeSub(request.headers.get('Authorization'), env.NEON_AUTH_URL!)
+        : await verifyTraineeSub(request.headers.get('Authorization'), env.STACK_PROJECT_ID)
   } catch (e) {
     if (e instanceof AuthError) return json({ error: e.message }, 401, origin)
     throw e
