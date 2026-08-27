@@ -14,6 +14,16 @@ export interface Env {
    * academy-frontend, Phase 2) can call verifyTraineeSub without a second
    * env shape. */
   STACK_PROJECT_ID: string
+  /** PROJ-011/ACP-434 — 'better-auth' selects betterAuthJwt.ts's verifier
+   * instead of jwt.ts's Stack one for the browser-facing PayPal routes
+   * (mirrors academy-web's functions/_lib/env.ts AUTH_PRODUCT switch,
+   * ACP-428). Unset means "verify as Stack", the existing behaviour,
+   * unchanged by construction. */
+  AUTH_PRODUCT?: string
+  /** Neon Managed Better Auth base URL (get_neon_auth_config's `base_url`,
+   * e.g. `.../neondb/auth`) — only required when AUTH_PRODUCT is
+   * 'better-auth'. */
+  NEON_AUTH_URL?: string
   /** PayPal REST app credentials (sandbox first) — does not exist yet, see
    * README's credential-boundary note. Client-credentials OAuth against
    * PAYPAL_API_BASE, per _lib/paypal.ts. */
@@ -103,6 +113,14 @@ export const ALLOWED_ORIGINS: string[] = [
   // alongside production origins here since this array is already a strict
   // allowlist, not a wildcard.
   'https://academy-frontend-qa.pages.dev',
+  // PROJ-011/ACP-434 — the VibeCreations-branded QA app instance's own
+  // origin (ACP-426). Missing here was the actual root cause of ACP-434's
+  // "Failed to fetch" bug: academy-frontend-vibe-qa's fetch to
+  // POST /api/paypal/subscriptions never got a CORS-approved response, so
+  // the browser surfaced a bare network-error TypeError with no status
+  // code or body to show — exactly this module's own doc comment above
+  // already predicted for any unlisted origin.
+  'https://academy-frontend-vibe-qa.pages.dev',
 ]
 
 export function corsHeaders(origin: string | null): Record<string, string> {
