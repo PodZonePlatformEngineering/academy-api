@@ -430,6 +430,79 @@ other half of this: a *successful* call does write exactly one row
 14, tokens_out: 4`) — the write path works correctly when it's supposed to
 fire, and correctly doesn't when it isn't.
 
+## ACP-437 — `academy-api-vibe-qa`'s AiGatewayError 2009 Unauthorized, fixed
+
+Found by ACP-436 (2026-08-27) once its Better Auth JWT fix let tutor/
+examiner requests reach the Gateway call on `academy-api-vibe-qa` (ACP-434's
+dedicated backend for the vibe-qa frontend): the call itself 401'd,
+`AiGatewayError` code 2009. No application code change was needed — the
+fix is entirely CF Pages config, made in the `academy-admin` repo's
+`scripts/ensure_cf_pages_vars.py` MANIFEST (PR academy-admin#112), which
+this section records the live-verification of since this repo owns the
+routes that were actually exercised.
+
+**Root cause, in two layers, each confirmed live rather than assumed:**
+
+1. `academy-api-vibe-qa` was missing `CLOUDFLARE_ACCOUNT_ID`/
+   `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_LOGS_TOKEN`/`GATEWAY_ID` entirely —
+   `proxyToGateway`'s `cf-aig-authorization` header was literally
+   `Bearer undefined`. Confirmed by diffing this project's live CF Pages
+   env vars against `academy-api-qa`'s (has all four) via the Cloudflare
+   API. Fixed by adding a new `academy-api-vibe-qa` MANIFEST entry, reusing
+   `academy-api-qa`'s account/`vibecreations-qa-gateway`.
+2. **A second, distinct 502 surfaced immediately after fixing (1)**, caught
+   only because this session insisted on a real tutor/examiner round-trip
+   rather than stopping at "the 2009 is gone": Anthropic itself replied
+   `authentication_error: x-api-key header is required`.
+   `vibecreations-qa-gateway`'s account has no Anthropic provider key on
+   file for Cloudflare Unified Billing, so a request carrying only
+   `cf-aig-authorization` (no `x-api-key`) passes Gateway auth but is then
+   rejected by Anthropic. Fixed by also setting `ANTHROPIC_API_KEY_QA`
+   (BYOK) on `academy-api-vibe-qa`, reusing the same vault credential
+   `academy-api-qa`'s own `ANTHROPIC_API_KEY_QA` was set from — that
+   project never surfaced this gap itself because its `GATEWAY_MODE=mock`
+   short-circuits before any real Anthropic call is made.
+
+**A third gotcha, same class as T-162's above**: after each `--apply` of
+the MANIFEST, the fix did NOT take effect until a fresh
+`POST .../pages/projects/academy-api-vibe-qa/deployments` was issued —
+confirmed live by GETting the *canonical* (currently-serving) deployment
+directly and finding it still snapshotted the pre-fix env var set from
+11:58 UTC, an hour before the `--apply` ran. Cloudflare Pages bakes env
+vars into a deployment snapshot at deploy-creation time, not read live —
+the same trap T-145 hit for a different project. PATCHing
+`deployment_configs.production.env_vars` converges the *project config*
+only; the live deployment needs a new build to pick it up.
+
+**Live-verified end-to-end**, real signup + redemption via
+`academy-frontend-vibe-qa` (same self-serve pattern ACP-436 used, redeeming
+through `/#/scoreboard` — a curriculum-agnostic entitlement gate, since
+vibe-qa's VibeCoding catalogue has no `academy-ai`-shaped paywall entry
+point to redeem through, per ACP-435's finding):
+
+- **Tutor** (`POST /api/tutor/chat` via the real Tutor UI): real streamed
+  Anthropic reply, `· N passages retrieved` rendered — no `AiGatewayError`,
+  no `x-api-key` error. (First 1-2 attempts right after signup 404'd with
+  `no trainee row for sub ...` — an unrelated, transient trainee-provisioning
+  race after fresh signup, not a regression of anything this fix touches;
+  retrying a few seconds later succeeds.)
+- **Examiner** (`POST /api/examiner/chat`, no frontend UI exists for this
+  route yet — called directly with the Better Auth JWT captured off the
+  Tutor request's own `Authorization` header, same token, well inside its
+  15-minute TTL): `200`, real Anthropic SSE (`message_start` with real
+  `usage`/`model` fields).
+- **Generic Stack-Auth QA target unaffected**: `academy-api-qa`'s live CF
+  Pages env vars were re-read after this fix and are byte-identical to
+  before (`GATEWAY_MODE=mock` still set, no new vars) — this fix only ever
+  added a new MANIFEST key for `academy-api-vibe-qa`, never touched the
+  existing `academy-api-qa` entry. `e2e/sign-in.spec.ts` (2/2) and
+  `e2e/home.spec.ts` re-run clean against the default
+  (`academy-frontend-qa`) target.
+- **Production untouched, by construction**: production's `academy-api`
+  project already has its own complete Gateway vars (T-158) and was never
+  in this MANIFEST change at all — read to confirm during the diagnosis,
+  never modified.
+
 ## Testing — what's covered, what's genuinely blocked
 
 Per the brief's §5 (T-151) and this update (T-152): parsing and the
