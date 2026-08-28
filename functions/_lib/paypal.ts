@@ -78,8 +78,26 @@ export interface WebhookEvent {
     status_update_time?: string
     create_time?: string
     billing_info?: { next_billing_time?: string }
+    // PAYMENT.SALE.COMPLETED-only fields (ACP-441) — a "sale" resource, not
+    // a "subscription" resource, so it carries neither `status` nor
+    // `custom_id`: `state` (lowercase 'completed', not PayPal's usual
+    // uppercase status enum) is the sale's own state, and
+    // `billing_agreement_id` — not `id` — is the subscription this payment
+    // belongs to; `id` here is the sale/capture id itself. Confirmed against
+    // current developer.paypal.com webhook-event-name docs + community-
+    // reported payload shape (no PAYMENT.SALE.COMPLETED example survives in
+    // paypal/paypal-rest-api-specifications' notifications_webhooks_v1.json
+    // — this event predates that spec repo), 2026-08-28.
+    state?: string
+    billing_agreement_id?: string
   }
 }
+
+/** ACP-441 — the subscription-billing payment event, handled separately
+ * from HANDLED_EVENT_TYPES/BILLING.SUBSCRIPTION.* above: its resource shape
+ * is a "sale", not a "subscription" (see WebhookEvent's field comments),
+ * so it can't run through extractSubscriptionFields/upsertSubscription. */
+export const PAYMENT_SALE_COMPLETED = 'PAYMENT.SALE.COMPLETED'
 
 interface OAuthTokenResponse {
   access_token: string
@@ -285,4 +303,42 @@ export async function getSubscription(
     throw new PayPalApiError(`get subscription failed: ${resp.status} ${await resp.text()}`)
   }
   return (await resp.json()) as CreatedSubscription
+}
+
+export interface RefundResult {
+  id: string
+  status: string
+}
+
+/**
+ * POST /v2/payments/captures/{capture_id}/refund — ACP-441. An empty
+ * request body means a full refund of the capture's entire amount (PayPal's
+ * own documented behaviour, confirmed against
+ * openapi/payments_payment_v2.json's refund_request examples, fetched
+ * 2026-08-28) — this repo only ever issues full refunds (brief §4's safe
+ * default; no partial-refund amount is threaded through anywhere in this
+ * codebase). Same idempotency-header posture as createSubscription: a fresh
+ * uuid per call, guarding only against a duplicate *network* retry of the
+ * same fetch, not against a caller submitting two separate refund requests
+ * (that's admin_record_subscription_refund's `WHERE refunded_at IS NULL`
+ * guard, academy-admin migration 077).
+ */
+export async function refundCapture(
+  apiBase: string,
+  accessToken: string,
+  captureId: string,
+): Promise<RefundResult> {
+  const resp = await fetch(`${apiBase}/v2/payments/captures/${captureId}/refund`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': crypto.randomUUID(),
+    },
+    body: '{}',
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`refund capture failed: ${resp.status} ${await resp.text()}`)
+  }
+  return (await resp.json()) as RefundResult
 }

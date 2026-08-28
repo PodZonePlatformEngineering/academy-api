@@ -3,7 +3,7 @@
 // particular) and response parsing, independent of a live PayPal call
 // (that's test/scripts/live-verify-custom-id.md's job, see README).
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createSubscription, getSubscription, PayPalApiError } from '../functions/_lib/paypal'
+import { createSubscription, getSubscription, refundCapture, PayPalApiError } from '../functions/_lib/paypal'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -82,5 +82,32 @@ describe('getSubscription', () => {
 
     const result = await getSubscription('https://api-m.sandbox.paypal.com', 'token', 'I-TESTSUB')
     expect(result.custom_id).toBe('42')
+  })
+})
+
+// ACP-441
+describe('refundCapture', () => {
+  it('POSTs an empty body (full refund) to the capture-id refund endpoint', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('https://api-m.sandbox.paypal.com/v2/payments/captures/8HN29713RM123456B/refund')
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBe('{}')
+      expect((init!.headers as Record<string, string>)['PayPal-Request-Id']).toBeTruthy()
+      return new Response(JSON.stringify({ id: '3TY12345AB678901C', status: 'COMPLETED' }), { status: 201 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await refundCapture('https://api-m.sandbox.paypal.com', 'token', '8HN29713RM123456B')
+    expect(result).toEqual({ id: '3TY12345AB678901C', status: 'COMPLETED' })
+  })
+
+  it('throws PayPalApiError on a non-2xx response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"name":"RESOURCE_NOT_FOUND"}', { status: 404 })),
+    )
+    await expect(
+      refundCapture('https://api-m.sandbox.paypal.com', 'token', 'NOSUCHCAPTURE'),
+    ).rejects.toBeInstanceOf(PayPalApiError)
   })
 })

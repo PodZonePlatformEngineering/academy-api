@@ -1,0 +1,13 @@
+{
+  "id": "WH-3RT65189HH123456X-8H710293FL456789A",
+  "event_type": "PAYMENT.SALE.COMPLETED",
+  "resource_type": "sale",
+  "create_time": "2026-09-02T10:15:03Z",
+  "summary": "Payment completed for I-BW452GLLEP1G",
+  "resource": {
+    "id": "8HN29713RM123456B",
+    "state": "completed",
+    "billing_agreement_id": "I-BW452GLLEP1G",
+    "create_time": "2026-09-02T10:15:03Z"
+  }
+}

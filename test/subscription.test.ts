@@ -9,10 +9,12 @@ import type { WebhookEvent } from '../functions/_lib/paypal'
 import {
   extractSubscriptionFields,
   upsertSubscription,
+  recordCaptureId,
   UnattributedSubscriptionError,
 } from '../functions/_lib/subscription'
 
 import activated from './fixtures/billing-subscription-activated.json'
+import paymentSaleCompleted from './fixtures/payment-sale-completed.json'
 import updated from './fixtures/billing-subscription-updated.json'
 import cancelled from './fixtures/billing-subscription-cancelled.json'
 import expired from './fixtures/billing-subscription-expired.json'
@@ -103,5 +105,30 @@ describe('upsertSubscription', () => {
     await expect(
       upsertSubscription(client, extractSubscriptionFields(updatedNoCustomId as WebhookEvent)),
     ).rejects.toThrow(UnattributedSubscriptionError)
+  })
+})
+
+// ACP-441 — the refund flow's write half of PAYMENT.SALE.COMPLETED
+// handling (webhook.ts reads resource.id/billing_agreement_id itself,
+// since that event's resource shape isn't SubscriptionFields-compatible;
+// see paypal.ts's WebhookEvent comment).
+describe('recordCaptureId', () => {
+  it('UPDATEs last_capture_id keyed on paypal_subscription_id', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const client = mockClient((sql, params) => {
+      calls.push({ sql, params })
+      return { rows: [], rowCount: 1 }
+    })
+
+    await recordCaptureId(client, paymentSaleCompleted.resource.billing_agreement_id, paymentSaleCompleted.resource.id)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toMatch(/^\s*UPDATE subscription SET last_capture_id/)
+    expect(calls[0].params).toEqual(['8HN29713RM123456B', 'I-BW452GLLEP1G'])
+  })
+
+  it('no-ops (no throw) when no subscription row matches', async () => {
+    const client = mockClient(() => ({ rows: [], rowCount: 0 }))
+    await expect(recordCaptureId(client, 'I-NOSUCHSUB', 'CAPTURE123')).resolves.toBeUndefined()
   })
 })
