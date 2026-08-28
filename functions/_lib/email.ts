@@ -45,6 +45,13 @@ export interface OrderConfirmationInput {
   amount: { currencyCode: string; value: string } | null
   nextBillingTime: string | null
   supportEmail: string
+  /** PROJ-011/ACP-448 — 'activation' (default) is the original ACP-444
+   * copy, unchanged, for BILLING.SUBSCRIPTION.ACTIVATED. 'renewal' is for
+   * PAYMENT.SALE.COMPLETED (the recurring-charge event folded into this
+   * brief, ACP-446) — deliberately NOT "subscription is now active" copy,
+   * since a renewal isn't a first signup (brief's own verification bar:
+   * "not a mislabelled first-signup email"). */
+  kind?: 'activation' | 'renewal'
 }
 
 /** Pure — builds the email content, no network. Kept separate from
@@ -57,15 +64,19 @@ export interface OrderConfirmationInput {
  * amount/next billing date are omitted from the copy, not guessed, when
  * the webhook event didn't carry them. */
 export function renderOrderConfirmationEmail(input: OrderConfirmationInput): { subject: string; html: string; text: string } {
+  const isRenewal = input.kind === 'renewal'
   const greeting = input.traineeName ? `Hi ${input.traineeName},` : 'Hi,'
-  const lines = [greeting, '', 'Your VibeCreations subscription is now active.', '']
+  const headline = isRenewal
+    ? 'Your VibeCreations subscription has renewed.'
+    : 'Your VibeCreations subscription is now active.'
+  const lines = [greeting, '', headline, '']
   if (input.planId) lines.push(`Plan: ${input.planId}`)
   if (input.amount) lines.push(`Amount: ${input.amount.value} ${input.amount.currencyCode}`)
   if (input.nextBillingTime) lines.push(`Next billing date: ${input.nextBillingTime}`)
   lines.push('', `Questions? Contact us at ${input.supportEmail}.`, '', '— VibeCreations')
 
   const text = lines.join('\n')
-  const html = `<p>${greeting}</p><p>Your VibeCreations subscription is now active.</p><ul>${[
+  const html = `<p>${greeting}</p><p>${headline}</p><ul>${[
     input.planId ? `<li>Plan: ${input.planId}</li>` : '',
     input.amount ? `<li>Amount: ${input.amount.value} ${input.amount.currencyCode}</li>` : '',
     input.nextBillingTime ? `<li>Next billing date: ${input.nextBillingTime}</li>` : '',
@@ -73,5 +84,9 @@ export function renderOrderConfirmationEmail(input: OrderConfirmationInput): { s
     .filter(Boolean)
     .join('')}</ul><p>Questions? Contact us at <a href="mailto:${input.supportEmail}">${input.supportEmail}</a>.</p><p>— VibeCreations</p>`
 
-  return { subject: 'Your VibeCreations subscription is confirmed', html, text }
+  return {
+    subject: isRenewal ? 'Your VibeCreations subscription has renewed' : 'Your VibeCreations subscription is confirmed',
+    html,
+    text,
+  }
 }

@@ -16,8 +16,13 @@
 // PROJ-011/ACP-444: ACTIVATED additionally sends an order-confirmation
 // email via _lib/email.ts — see README's "Order-confirmation email"
 // section for the design and the live-checked Resend domain-verification
-// blocker (RESEND_API_KEY/RESEND_FROM_ADDRESS aren't set as Pages secrets
-// yet, so this path is fully wired and unit-tested but not yet live).
+// (RESEND_API_KEY/RESEND_FROM_ADDRESS are set as Pages secrets and
+// confirmed delivering via mail.podzone.uk, domain verified 2026-08-28).
+//
+// PROJ-011/ACP-448 (folds in ACP-446): PAYMENT.SALE.COMPLETED now also
+// credits the trainee's persistent quota balance (_lib/quota.ts) and sends
+// a recurring-charge variant of the same order-confirmation email — see
+// that branch's own comment below.
 import type { Env } from '../../_lib/env'
 import { json } from '../../_lib/env'
 import { withClient } from '../../_lib/db'
@@ -38,6 +43,7 @@ import {
   UnattributedSubscriptionError,
 } from '../../_lib/subscription'
 import { sendEmail, renderOrderConfirmationEmail } from '../../_lib/email'
+import { creditQuota, resolveQuotaGrantAmount } from '../../_lib/quota'
 
 const SUPPORT_EMAIL = 'podzone.cloud@gmail.com'
 
@@ -78,12 +84,67 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   // before isHandledEventType's BILLING.SUBSCRIPTION.*-shaped check below,
   // since running it through extractSubscriptionFields/upsertSubscription
   // would misread billing_agreement_id as nothing and status as ''.
+  //
+  // PROJ-011/ACP-448 + folded-in ACP-446 (2026-08-28): this is also the
+  // quota-accrual event (decision 2 — +50 per successful payment, non-
+  // resetting) and the recurring-charge email trigger. Both best-effort in
+  // the sense that a Resend failure never fails the ack (same posture
+  // ACP-444 took for the ACTIVATED path below) — but crediting quota is
+  // NOT best-effort, it happens inside the same withClient block as
+  // recordCaptureId, before the ack, since a silently-dropped credit is a
+  // real product bug (a trainee paid and got nothing), not a soft failure.
   if (event.event_type === PAYMENT_SALE_COMPLETED) {
-    const { id: captureId, billing_agreement_id: paypalSubscriptionId } = event.resource
+    const { id: captureId, billing_agreement_id: paypalSubscriptionId, amount } = event.resource
     if (paypalSubscriptionId) {
-      await withClient(env.NEON_DATABASE_URL, (client) =>
-        recordCaptureId(client, paypalSubscriptionId, captureId),
-      )
+      const recipient = await withClient(env.NEON_DATABASE_URL, async (client) => {
+        await recordCaptureId(client, paypalSubscriptionId, captureId)
+        // Resolve the trainee this payment belongs to via the subscription
+        // row's own trainee_id (same join key recordCaptureId's own UPDATE
+        // matched on) — not fields.customId, since a sale resource carries
+        // no custom_id at all (see paypal.ts's WebhookEvent comment).
+        const row = await client.query<{
+          trainee_id: number
+          email: string | null
+          display_name: string | null
+          current_period_end: string | null
+        }>(
+          `SELECT s.trainee_id, t.email, t.display_name, s.current_period_end
+             FROM subscription s JOIN trainee t ON t.id = s.trainee_id
+            WHERE s.paypal_subscription_id = $1`,
+          [paypalSubscriptionId],
+        )
+        const sub = row.rows[0]
+        if (!sub) return null
+        await creditQuota(client, sub.trainee_id, resolveQuotaGrantAmount(env))
+        return sub.email ? { email: sub.email, displayName: sub.display_name, nextBillingTime: sub.current_period_end } : null
+      })
+      if (recipient) {
+        try {
+          const email = renderOrderConfirmationEmail({
+            to: recipient.email,
+            traineeName: recipient.displayName,
+            planId: null, // a sale resource carries no plan_id (see paypal.ts)
+            amount: amount?.total && amount.currency ? { value: amount.total, currencyCode: amount.currency } : null,
+            nextBillingTime: recipient.nextBillingTime,
+            supportEmail: SUPPORT_EMAIL,
+            kind: 'renewal',
+          })
+          await sendEmail(env.RESEND_API_KEY, {
+            from: env.RESEND_FROM_ADDRESS,
+            to: recipient.email,
+            subject: email.subject,
+            html: email.html,
+            text: email.text,
+          })
+        } catch (e) {
+          // Never rethrown — same reasoning as the ACTIVATED path below:
+          // the quota credit above has already committed either way, and
+          // PayPal retrying an identical delivery wouldn't fix a broken
+          // Resend send.
+          const message = e instanceof Error ? e.message : String(e)
+          console.error(`[paypal webhook] recurring-charge email failed: ${message}`)
+        }
+      }
     }
     return json({ received: true, handled: true }, 200)
   }

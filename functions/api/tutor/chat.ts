@@ -5,10 +5,13 @@
 // channel, untouched — this route is new and additive).
 //
 // Order, per the design doc §1 + the operator's T-161 rate-limit decision
-// folded in 2026-08-03: JWT verify -> resolve trainee_id -> assertFeature-
-// Entitled('inference') -> 50-turn monthly cap check -> resolve the active
-// subscription.id -> proxy to the Gateway, stream back -> write the
-// synchronous half of ai_gateway_usage.
+// folded in 2026-08-03, superseded by ACP-448's 2026-08-28 quota-balance
+// redesign: JWT verify -> resolve trainee_id -> assertFeatureEntitled
+// ('inference') -> quota-balance check (persistent, non-expiring — see
+// _lib/quota.ts; a token-holder's fixed lifetime budget is unchanged) ->
+// resolve the active subscription.id -> proxy to the Gateway, stream back
+// -> write the synchronous half of ai_gateway_usage + decrement the spent
+// turn off the balance.
 //
 // No academy-frontend changes here (task 2 of the 3-brief breakdown,
 // t157-inference-delivery-design.md §5) — this route is deliberately
@@ -30,7 +33,8 @@ import {
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countMonthlyTurns, countTokenTurns, resolveMonthlyTurnCap } from '../../_lib/turnCap'
+import { countTokenTurns } from '../../_lib/turnCap'
+import { getQuotaBalance, decrementQuota } from '../../_lib/quota'
 import {
   proxyToGateway,
   proxyToGatewayWithTools,
@@ -88,25 +92,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // MONTHLY_TURN_CAP entirely for a token-holder (design note in
       // academy-admin migration 064).
       const resolvedAccessToken = await resolveActiveAccessToken(client, resolvedTraineeId)
-      const turnCount = resolvedAccessToken
-        ? await countTokenTurns(client, resolvedAccessToken.id)
-        : await countMonthlyTurns(client, resolvedTraineeId)
-      const turnCap = resolvedAccessToken ? resolvedAccessToken.turnQuota : resolveMonthlyTurnCap(env)
+      // PROJ-011/ACP-448 — a token-holder's fixed lifetime budget stays
+      // exactly as it was (turnCap.ts's countTokenTurns/turnQuota,
+      // unaffected by this brief, brief §5); everyone else now gates on
+      // the persistent, non-expiring quota balance (_lib/quota.ts)
+      // instead of a calendar-month turn count.
+      const tokenTurnCount = resolvedAccessToken ? await countTokenTurns(client, resolvedAccessToken.id) : null
+      const quotaBalance = resolvedAccessToken ? null : await getQuotaBalance(client, resolvedTraineeId)
       return {
         traineeId: resolvedTraineeId,
         subscriptionId: resolvedSubscriptionId,
         accessTokenId: resolvedAccessToken?.id ?? null,
         hasLibraryAccess: resolvedLibraryAccess,
-        turnCount,
-        turnCap,
+        tokenTurnCount,
+        tokenTurnCap: resolvedAccessToken?.turnQuota ?? null,
+        quotaBalance,
       }
     })
-    if (gate.turnCount >= gate.turnCap) {
+    if (gate.accessTokenId) {
       // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
-      const capDescription = gate.accessTokenId
-        ? `token turn cap reached (${gate.turnCap} turns)`
-        : `monthly turn cap reached (${gate.turnCap} turns/calendar month)`
-      return json({ error: capDescription }, 429, origin)
+      if (gate.tokenTurnCount! >= gate.tokenTurnCap!) {
+        return json({ error: `token turn cap reached (${gate.tokenTurnCap} turns)` }, 429, origin)
+      }
+    } else if (gate.quotaBalance! <= 0) {
+      return json({ error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more' }, 429, origin)
     }
     traineeId = gate.traineeId
     subscriptionId = gate.subscriptionId
@@ -156,9 +165,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     (async () => {
       const usage = await gatewayResult.usage
       const gatewayLogId = gatewayResult.gatewayLogId
-      const rowId = await withClient(env.NEON_DATABASE_URL, (client) =>
-        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId, accessTokenId),
-      )
+      const rowId = await withClient(env.NEON_DATABASE_URL, async (client) => {
+        const id = await insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId, accessTokenId)
+        // PROJ-011/ACP-448 — spend the turn off the persistent quota
+        // balance, not the token's fixed pool (accessTokenId holders never
+        // touch trainee_quota_balance at all, brief §5). Same async-after-
+        // the-fact timing insertUsageRow itself already has: the turn was
+        // already served by the pre-flight balance check above, this just
+        // records the spend.
+        if (!accessTokenId) await decrementQuota(client, traineeId)
+        return id
+      })
       // Async half (T-160): cost isn't on the inference response, only on
       // the Gateway's logs endpoint, and that endpoint's indexing lags the
       // inference response by a beat under real conditions (unlike this
