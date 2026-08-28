@@ -89,6 +89,16 @@ export interface Env {
    * key directly, so QA's Anthropic-side cost reporting reads separately
    * from production's Cloudflare-account Unified Billing spend. */
   ANTHROPIC_API_KEY_QA?: string
+  /** PROJ-011/ACP-444 — Resend API key (`resend-api-token` vault
+   * credential), used by `_lib/email.ts` to send the order-confirmation
+   * email from the BILLING.SUBSCRIPTION.ACTIVATED webhook path. */
+  RESEND_API_KEY: string
+  /** PROJ-011/ACP-444 — the verified From address `_lib/email.ts` sends
+   * with. Env-scoped, not hardcoded, because the domain has to be verified
+   * in the Resend account before any real send will succeed — see
+   * README's credential-boundary section for the current verification
+   * status. */
+  RESEND_FROM_ADDRESS: string
 }
 
 // T-145's CORS pattern (academy-web's functions/_lib/env.ts). The PayPal

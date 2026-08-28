@@ -77,7 +77,19 @@ export interface WebhookEvent {
     custom_id?: string
     status_update_time?: string
     create_time?: string
-    billing_info?: { next_billing_time?: string }
+    // last_payment is additive to what extractSubscriptionFields (subscription.ts)
+    // reads — only email.ts's order-confirmation content uses it (PROJ-011/
+    // ACP-444). Confirmed against openapi/billing_subscriptions_v1.json's
+    // subscription_billing_info -> last_payment_details -> money schemas,
+    // fetched 2026-08-28: billing_info's own description ("If the
+    // subscription was or is active, these fields are populated") means
+    // this can legitimately be absent even on ACTIVATED if PayPal hasn't
+    // captured a payment yet — code reading it must treat it as optional,
+    // not assume presence.
+    billing_info?: {
+      next_billing_time?: string
+      last_payment?: { amount?: { currency_code?: string; value?: string }; time?: string }
+    }
     // PAYMENT.SALE.COMPLETED-only fields (ACP-441) — a "sale" resource, not
     // a "subscription" resource, so it carries neither `status` nor
     // `custom_id`: `state` (lowercase 'completed', not PayPal's usual

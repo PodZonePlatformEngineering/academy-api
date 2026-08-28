@@ -12,6 +12,12 @@
 // section. The parse + upsert path this handler drives (extractSubscriptionFields
 // + upsertSubscription) is unit-tested against PayPal's documented resource
 // shape independent of signature verification (test/subscription.test.ts).
+//
+// PROJ-011/ACP-444: ACTIVATED additionally sends an order-confirmation
+// email via _lib/email.ts — see README's "Order-confirmation email"
+// section for the design and the live-checked Resend domain-verification
+// blocker (RESEND_API_KEY/RESEND_FROM_ADDRESS aren't set as Pages secrets
+// yet, so this path is fully wired and unit-tested but not yet live).
 import type { Env } from '../../_lib/env'
 import { json } from '../../_lib/env'
 import { withClient } from '../../_lib/db'
@@ -31,6 +37,9 @@ import {
   recordCaptureId,
   UnattributedSubscriptionError,
 } from '../../_lib/subscription'
+import { sendEmail, renderOrderConfirmationEmail } from '../../_lib/email'
+
+const SUPPORT_EMAIL = 'podzone.cloud@gmail.com'
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const { request, env } = context
@@ -87,10 +96,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return json({ received: true, handled: false }, 200)
   }
 
+  let trainee: { email: string; display_name: string | null } | null = null
   try {
-    await withClient(env.NEON_DATABASE_URL, async (client) => {
+    trainee = await withClient(env.NEON_DATABASE_URL, async (client) => {
       const fields = extractSubscriptionFields(event)
       await upsertSubscription(client, fields)
+
+      // PROJ-011/ACP-444 — order-confirmation email, ACTIVATED only (brief
+      // §3: "trigger the email from the ACTIVATED handler path"). Resolved
+      // via the same subscription -> trainee join fields.customId already
+      // gives upsertSubscription (T-152 sets custom_id = trainee_id at
+      // subscription-create time), not a second webhook-driven attribution
+      // path. A trainee row with a NULL email (a real, live gap — see
+      // academy-admin migrations/074's header) or an absent customId just
+      // means no email goes out; the subscription upsert above has already
+      // committed either way.
+      if (event.event_type === 'BILLING.SUBSCRIPTION.ACTIVATED' && fields.customId) {
+        const traineeId = Number(fields.customId)
+        if (Number.isInteger(traineeId)) {
+          const result = await client.query<{ email: string | null; display_name: string | null }>(
+            'SELECT email, display_name FROM trainee WHERE id = $1',
+            [traineeId],
+          )
+          const row = result.rows[0]
+          if (row?.email) return { email: row.email, display_name: row.display_name }
+        }
+      }
+      return null
     })
   } catch (e) {
     if (e instanceof UnattributedSubscriptionError) {
@@ -104,6 +136,43 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return json({ received: true, handled: false, error: e.message }, 200)
     }
     throw e
+  }
+
+  if (trainee) {
+    // Best-effort, deliberately outside the DB try/catch above and never
+    // allowed to turn a successful subscription-upsert into a failed ack —
+    // brief's own verification bar ("the email is an addition, not a
+    // replacement of existing logic"). A Resend failure here (e.g. the
+    // from-address's domain isn't verified yet, see README) is logged and
+    // swallowed, not retried by PayPal, since retrying an identical
+    // delivery wouldn't fix a Resend-side config problem either.
+    try {
+      const r = event.resource
+      const email = renderOrderConfirmationEmail({
+        to: trainee.email,
+        traineeName: trainee.display_name,
+        planId: r.plan_id ?? null,
+        amount: r.billing_info?.last_payment?.amount?.value && r.billing_info.last_payment.amount.currency_code
+          ? { value: r.billing_info.last_payment.amount.value, currencyCode: r.billing_info.last_payment.amount.currency_code }
+          : null,
+        nextBillingTime: r.billing_info?.next_billing_time ?? null,
+        supportEmail: SUPPORT_EMAIL,
+      })
+      await sendEmail(env.RESEND_API_KEY, {
+        from: env.RESEND_FROM_ADDRESS,
+        to: trainee.email,
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+      })
+    } catch (e) {
+      // Never rethrown, even for a non-ResendApiError (e.g. a raw network
+      // failure) — an ack failure here would make PayPal retry a delivery
+      // whose subscription-upsert has already succeeded, and a broken send
+      // path never becomes any less broken for the retry.
+      const message = e instanceof Error ? e.message : String(e)
+      console.error(`[paypal webhook] order-confirmation email failed: ${message}`)
+    }
   }
 
   return json({ received: true, handled: true }, 200)
