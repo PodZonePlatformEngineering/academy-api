@@ -3,7 +3,13 @@
 // particular) and response parsing, independent of a live PayPal call
 // (that's test/scripts/live-verify-custom-id.md's job, see README).
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createSubscription, getSubscription, refundCapture, PayPalApiError } from '../functions/_lib/paypal'
+import {
+  createSubscription,
+  getSubscription,
+  refundCapture,
+  cancelSubscription,
+  PayPalApiError,
+} from '../functions/_lib/paypal'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -108,6 +114,34 @@ describe('refundCapture', () => {
     )
     await expect(
       refundCapture('https://api-m.sandbox.paypal.com', 'token', 'NOSUCHCAPTURE'),
+    ).rejects.toBeInstanceOf(PayPalApiError)
+  })
+})
+
+// ACP-445
+describe('cancelSubscription', () => {
+  it('posts the reason to the cancel endpoint and resolves on a 204', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('https://api-m.sandbox.paypal.com/v1/billing/subscriptions/I-TESTSUB/cancel')
+      expect(init?.method).toBe('POST')
+      const body = JSON.parse(init!.body as string)
+      expect(body).toEqual({ reason: 'Cancelled by trainee' })
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      cancelSubscription('https://api-m.sandbox.paypal.com', 'token', 'I-TESTSUB', 'Cancelled by trainee'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('throws PayPalApiError on a non-2xx response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"name":"RESOURCE_NOT_FOUND"}', { status: 404 })),
+    )
+    await expect(
+      cancelSubscription('https://api-m.sandbox.paypal.com', 'token', 'I-MISSING', 'Cancelled by trainee'),
     ).rejects.toBeInstanceOf(PayPalApiError)
   })
 })

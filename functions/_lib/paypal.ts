@@ -361,3 +361,40 @@ export async function refundCapture(
   }
   return (await resp.json()) as RefundResult
 }
+
+/**
+ * POST /v1/billing/subscriptions/{id}/cancel — PROJ-011/ACP-445. Request/
+ * response shape confirmed against openapi/billing_subscriptions_v1.json's
+ * cancel operation, fetched 2026-08-28: body is `{ reason: string }`
+ * (PayPal's schema marks it optional, but this repo always sends one —
+ * brief §1 calls out that PayPal's docs describe it as required in
+ * practice), success is `204 No Content` with no response body — there is
+ * nothing to parse or return.
+ *
+ * This only stops future billing/quota accrual on PayPal's side (brief
+ * "Context": ACP-448 already made `is_feature_entitled` ignore
+ * `subscription.status` for the quota-holding OR-path). It never touches
+ * `trainee_quota_balance` directly, and callers must not add any
+ * entitlement-revocation logic around this call — `subscription.status`
+ * syncing to CANCELLED happens later via the existing
+ * BILLING.SUBSCRIPTION.CANCELLED webhook path (webhook.ts), same as any
+ * other PayPal-initiated status change.
+ */
+export async function cancelSubscription(
+  apiBase: string,
+  accessToken: string,
+  subscriptionId: string,
+  reason: string,
+): Promise<void> {
+  const resp = await fetch(`${apiBase}/v1/billing/subscriptions/${subscriptionId}/cancel`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ reason }),
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`cancel subscription failed: ${resp.status} ${await resp.text()}`)
+  }
+}

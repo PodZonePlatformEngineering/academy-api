@@ -45,8 +45,8 @@ bare Worker instead — Pages Functions it is.
 | `_lib/db.ts` | copied verbatim (T-141/T-146) | One `Pool` per Pages Function invocation, never a module-level singleton — T-146 found the hard way that a cached `Pool`'s WebSocket doesn't survive past the request that created it. |
 | `_lib/env.ts` | ported + trimmed | Same `Env`/`json`/`handleOptions` shape as academy-web's. `ALLOWED_ORIGINS` is empty here — no browser-facing route exists yet in this repo (see `_lib/env.ts`'s comment for when to populate it). |
 | `_lib/entitlement.ts` | ported + extended (T-151, T-152, T-158) | Curriculum/track `isEntitled`/`assertEntitled` copied verbatim, **plus** `isFeatureEntitled`/`assertFeatureEntitled` (T-151, TS port of T-150's `academy.is_feature_entitled`/`assert_feature_entitled`), `resolveTraineeId` (T-152) — resolves a verified JWT `sub` to the numeric `trainee_id` `subscription.trainee_id`/PayPal's `custom_id` are keyed on, same GUC-dance shape throughout — **plus new** `resolveActiveSubscriptionId`/`insertUsageRow` (T-158). |
-| `_lib/paypal.ts` | new (T-151) + extended (T-152) | OAuth2 client-credentials token fetch, webhook-signature verification, event-type gating, **plus** `createSubscription`/`getSubscription` (T-152). See "PayPal research" below. |
-| `_lib/subscription.ts` | new | Pure field extraction + idempotent `subscription` upsert. |
+| `_lib/paypal.ts` | new (T-151) + extended (T-152, ACP-445) | OAuth2 client-credentials token fetch, webhook-signature verification, event-type gating, **plus** `createSubscription`/`getSubscription` (T-152), **plus** `cancelSubscription` (ACP-445). See "PayPal research" below. |
+| `_lib/subscription.ts` | new + extended (ACP-445) | Pure field extraction + idempotent `subscription` upsert, **plus** `findOwnedSubscription` (ACP-445) — the self-service cancel endpoint's ownership check. |
 | `_lib/turnCap.ts` | new (T-158) | `MONTHLY_TURN_CAP = 50` + `countMonthlyTurns`, the operator's T-161 rate-limit decision (a flat 50 turns/calendar month/subscription) folded into this brief. Counted off `ai_gateway_usage` — no new table. |
 | `_lib/gateway.ts` | new (T-158) | Hand-rolled `fetch()` + `response.body.tee()` proxy to Cloudflare AI Gateway's `/ai/v1/messages`, plus `readGatewayUsage` (pure SSE-parsing, unit-tested). See "Inference route" below for why this isn't the `@anthropic-ai/sdk` client despite resolving the SDK's auth-header question first. |
 | `_lib/email.ts` | new (ACP-444) | Resend `POST /emails` wrapper (`sendEmail`) + pure content builder (`renderOrderConfirmationEmail`), used by the webhook's `BILLING.SUBSCRIPTION.ACTIVATED` path. See "Order-confirmation email" below — **blocked on Resend domain verification**, not deployed live. |
@@ -210,6 +210,76 @@ pulled directly from PayPal's own OpenAPI spec repo
 — there is no separate `billing_plans_v1.json`; plans live in the
 subscriptions spec), not carried over from the brief's illustrative text or
 general knowledge.
+
+## Self-service cancel endpoint (`functions/api/paypal/subscription/cancel.ts`, ACP-445)
+
+`POST /api/paypal/subscription/cancel` — the trainee-facing counterpart to
+`subscriptions.ts`, same auth-dispatch/`resolveTraineeId` shape:
+
+1. Verifies the caller's JWT (Stack or Better Auth per `env.AUTH_PRODUCT`) —
+   401 if missing/invalid.
+2. Resolves the caller's `trainee_id` via `resolveTraineeId` — never a
+   client-supplied id.
+3. Takes `paypalSubscriptionId` (required) + optional `reason` from the
+   request body, then confirms that subscription actually belongs to the
+   resolved `trainee_id` (`_lib/subscription.ts`'s new
+   `findOwnedSubscription`, a plain `trainee_id = $2` predicate against this
+   repo's own `subscription` mirror) before ever calling PayPal — 404 on no
+   match, identical to "no such subscription" for both "wrong trainee" and
+   "doesn't exist" so neither leaks which case it was.
+4. Already-`CANCELLED`/`EXPIRED` is a 200 no-op (PayPal's own cancel
+   endpoint 4xxs on an already-terminal subscription; the trainee's intent
+   is already satisfied).
+5. Otherwise calls PayPal's `POST /v1/billing/subscriptions/{id}/cancel`
+   (`_lib/paypal.ts`'s new `cancelSubscription` — request/response shape
+   confirmed against `openapi/billing_subscriptions_v1.json`'s cancel
+   operation, fetched 2026-08-28: `{ reason: string }` body, `204 No
+   Content` success, nothing to parse).
+
+**This only stops future PayPal billing/quota accrual.** Per the brief's
+operator decision (ACP-448, already live): `subscription.status` syncing to
+`CANCELLED` happens later, asynchronously, via the existing
+`BILLING.SUBSCRIPTION.CANCELLED` webhook handler (`webhook.ts`) — this
+endpoint never writes `subscription.status` or `trainee_quota_balance`
+itself, and `academy.is_feature_entitled` already ignores
+`subscription.status` for the quota-holding OR-path (`inference`/
+`examination`), so a cancelled-but-quota-holding trainee keeps access until
+their accrued quota runs out, same as before this brief.
+
+### Live verification (2026-08-28)
+
+- **Ownership check** — proved directly against `vibecreations-training`
+  (`curly-voice-88063025`) on a disposable branch (created, queried,
+  deleted): inserted one `subscription` row owned by `trainee_id=2`, then
+  ran `findOwnedSubscription`'s exact query as both the owning trainee
+  (`trainee_id=2`, returns the row) and a different trainee
+  (`trainee_id=3`, returns zero rows — the 404 path, never reaching
+  PayPal). Confirms a trainee genuinely cannot address someone else's
+  subscription id.
+- **PayPal cancel contract** — called the VibeCreations sandbox app's real
+  `POST /v1/billing/subscriptions/{id}/cancel` live (same OAuth/plan this
+  repo uses, `P-3PY25649RR320045LNKFYPDI`) against a disposable test
+  subscription. It 404s (`RESOURCE_NOT_FOUND`) on a subscription still in
+  `APPROVAL_PENDING` — PayPal has nothing to cancel until a buyer actually
+  approves it, confirmed as expected PayPal behaviour, not a bug in this
+  endpoint (a trainee only ever sees the cancel UI once their subscription
+  is already `ACTIVE`, i.e. already approved).
+- **Not yet live-verified**: a cancel call against a genuinely `ACTIVE`
+  subscription end-to-end (create → real sandbox buyer approves via hosted
+  checkout → cancel → confirm PayPal's sandbox reflects `CANCELLED` → wait
+  for/trigger the webhook → confirm `subscription.status` syncs and
+  `is_feature_entitled('inference')` still returns true throughout). This
+  needs a real PayPal sandbox buyer login completing hosted checkout
+  (`e2e/subscribe.spec.ts`'s existing `PAYPAL_QA_USERNAME`/`PASSWORD`-gated
+  pattern) — the vibecreations-frontend e2e spec now includes this flow
+  (see `academy-frontend/e2e/subscribe.spec.ts`), but running it needs
+  credentials for a sandbox buyer account scoped to the VibeCreations app
+  specifically, which this session couldn't confirm exist correctly-paired
+  in the secrets vault (`paypal_vibecreations-sandbox_password` has no
+  obvious matching buyer *username* secret, only the app's own
+  client id/secret). Flagged for the Team Lead / operator to either point
+  at the right buyer credential or run `e2e/subscribe.spec.ts` once one
+  exists.
 
 ### Sandbox product + plan (T-152 §1) — ids, record them here since a
 sandbox plan isn't reconstructable by guessing
