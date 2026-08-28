@@ -148,3 +148,27 @@ export async function recordCaptureId(
     [captureId, paypalSubscriptionId],
   )
 }
+
+/**
+ * ACP-445 — ownership check for the self-service cancel endpoint. Reads
+ * this repo's own `subscription` row (the webhook-maintained mirror, not a
+ * live PayPal call) with a plain `trainee_id = $2` predicate rather than
+ * the RLS/GUC dance `entitlement.ts` uses elsewhere: `withClient`'s pool
+ * already runs as the owner role, and a cancel endpoint's own query is a
+ * simpler, more auditable place to assert "this row belongs to this
+ * trainee" than round-tripping through `academy.current_trainee_id()` for
+ * a single-table lookup. Returns null if there is no row at all, or the
+ * row belongs to a different trainee — both cases the caller must treat
+ * identically (a clean 404, never leaking which case it was).
+ */
+export async function findOwnedSubscription(
+  client: PoolClient,
+  traineeId: number,
+  paypalSubscriptionId: string,
+): Promise<{ status: string } | null> {
+  const result = await client.query<{ status: string }>(
+    'SELECT status FROM subscription WHERE paypal_subscription_id = $1 AND trainee_id = $2',
+    [paypalSubscriptionId, traineeId],
+  )
+  return result.rows[0] ?? null
+}

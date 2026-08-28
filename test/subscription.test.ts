@@ -10,6 +10,7 @@ import {
   extractSubscriptionFields,
   upsertSubscription,
   recordCaptureId,
+  findOwnedSubscription,
   UnattributedSubscriptionError,
 } from '../functions/_lib/subscription'
 
@@ -130,5 +131,29 @@ describe('recordCaptureId', () => {
   it('no-ops (no throw) when no subscription row matches', async () => {
     const client = mockClient(() => ({ rows: [], rowCount: 0 }))
     await expect(recordCaptureId(client, 'I-NOSUCHSUB', 'CAPTURE123')).resolves.toBeUndefined()
+  })
+})
+
+describe('findOwnedSubscription', () => {
+  it('scopes the lookup to both paypal_subscription_id and trainee_id', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const client = mockClient((sql, params) => {
+      calls.push({ sql, params })
+      return { rows: [{ status: 'ACTIVE' }] }
+    })
+
+    const result = await findOwnedSubscription(client, 42, 'I-TESTSUB')
+
+    expect(calls[0].sql).toMatch(/WHERE paypal_subscription_id = \$1 AND trainee_id = \$2/)
+    expect(calls[0].params).toEqual(['I-TESTSUB', 42])
+    expect(result).toEqual({ status: 'ACTIVE' })
+  })
+
+  it('returns null when no row matches — a wrong trainee_id and a missing subscription look identical', async () => {
+    const client = mockClient(() => ({ rows: [] }))
+
+    const result = await findOwnedSubscription(client, 42, 'I-NOT-MINE')
+
+    expect(result).toBeNull()
   })
 })
