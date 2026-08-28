@@ -68,12 +68,17 @@ export interface Env {
    * `functions/_lib/gateway.ts` returns a canned SSE response instead of
    * spending real Anthropic/Gateway tokens on QA traffic. */
   GATEWAY_MODE?: string
-  /** PROJ-011/ACP-409 follow-up — QA-only override of turnCap.ts's
-   * DEFAULT_MONTHLY_TURN_CAP (production's real 50/month). Unset means
+  /** PROJ-011/ACP-448 — QA-only override of quota.ts's
+   * DEFAULT_QUOTA_GRANT_AMOUNT (production's real 50/payment). Unset means
    * "use the default", production's existing behaviour, unchanged by
-   * construction. Only `academy-api-qa` sets this (to 5), so quota
-   * exhaustion is actually reachable in an e2e run. */
-  MONTHLY_TURN_CAP?: string
+   * construction. Supersedes ACP-409's MONTHLY_TURN_CAP (the old flat
+   * monthly-cap mechanism this brief replaces) — same QA-reachability
+   * purpose, now expressed as "how much a sandbox payment credits" rather
+   * than "how high the count is allowed to go", since the gate itself is no
+   * longer a count. Only `academy-api-qa`/`academy-api-vibe-qa` set this
+   * (to a small number), so quota exhaustion is actually reachable in an
+   * e2e run without waiting on 50 real chat turns. */
+  QUOTA_GRANT_AMOUNT?: string
   /** PROJ-011 (2026-08-24) — QA cost-separation: overrides `TUTOR_GATEWAY_ID`
    * ('training-gateway') with a second, dedicated Cloudflare AI Gateway
    * (vibecreations-branded, e.g. 'vibecreations-qa-gateway') so QA's Gateway

@@ -8,12 +8,18 @@
 // second, small, dedicated route avoids.
 //
 // Order mirrors chat.ts: JWT verify -> resolve trainee_id -> assertFeature-
-// Entitled('examination') -> shared 50-turn/month cap check (brief decision
-// 2: exam turns are NOT independently capped — they share ai_gateway_usage
-// with the Teacher, so countMonthlyTurns already counts both without any
-// extra wiring) -> resolve the active subscription.id -> proxy to the
-// Gateway with RECORD_EXAMINER_VERDICT_TOOL offered -> stream back -> write
-// the synchronous half of ai_gateway_usage (same table, same cap accounting).
+// Entitled('examination') -> shared quota-balance check (brief decision 2:
+// exam turns are NOT independently capped — they share ai_gateway_usage
+// with the Teacher, and PROJ-011/ACP-448's persistent quota balance is
+// likewise shared, decremented by either route without any extra wiring)
+// -> resolve the active subscription.id -> proxy to the Gateway with
+// RECORD_EXAMINER_VERDICT_TOOL offered -> stream back -> write the
+// synchronous half of ai_gateway_usage (same table, same cap accounting).
+//
+// PROJ-011/ACP-448 note: unlike tutor/chat.ts, this route has never
+// special-cased an access-token holder (no resolveActiveAccessToken call
+// here pre-dates this brief) — that stays a pre-existing gap, out of this
+// brief's scope, not something introduced here.
 //
 // tutor_session_id/enrolment_id/module_id are supplied by the client
 // (academy-frontend opens tutor_session with mode='examine' itself — same
@@ -38,7 +44,7 @@ import {
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countMonthlyTurns, resolveMonthlyTurnCap } from '../../_lib/turnCap'
+import { getQuotaBalance, decrementQuota } from '../../_lib/quota'
 import {
   proxyToGatewayWithTools,
   recordExaminerVerdictToolOffer,
@@ -95,15 +101,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const resolvedTraineeId = await resolveTraineeId(client, traineeSub)
       await assertFeatureEntitled(client, traineeSub, 'examination')
       const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
-      const turnCount = await countMonthlyTurns(client, resolvedTraineeId)
-      return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, turnCount }
+      const quotaBalance = await getQuotaBalance(client, resolvedTraineeId)
+      return { traineeId: resolvedTraineeId, subscriptionId: resolvedSubscriptionId, quotaBalance }
     })
-    const monthlyTurnCap = resolveMonthlyTurnCap(env)
-    if (gate.turnCount >= monthlyTurnCap) {
-      // Shared with the Teacher (brief decision 2) — ai_gateway_usage rows
-      // from either route count toward the same cap, no separate exam quota.
+    if (gate.quotaBalance <= 0) {
+      // Shared with the Teacher (brief decision 2) — the persistent quota
+      // balance is decremented by either route, no separate exam quota.
       return json(
-        { error: `monthly turn cap reached (${monthlyTurnCap} turns/calendar month, shared with the Teacher)` },
+        { error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more' },
         429,
         origin,
       )
@@ -145,9 +150,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     (async () => {
       const usage = await gatewayResult.usage
       const gatewayLogId = gatewayResult.gatewayLogId
-      const rowId = await withClient(env.NEON_DATABASE_URL, (client) =>
-        insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId),
-      )
+      const rowId = await withClient(env.NEON_DATABASE_URL, async (client) => {
+        const id = await insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId)
+        // PROJ-011/ACP-448 — spend the turn off the shared persistent quota
+        // balance, same as tutor/chat.ts.
+        await decrementQuota(client, traineeId)
+        return id
+      })
       if (gatewayLogId) {
         for (const delayMs of [0, 1500, 3000]) {
           if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))

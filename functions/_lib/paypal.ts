@@ -102,6 +102,13 @@ export interface WebhookEvent {
     // — this event predates that spec repo), 2026-08-28.
     state?: string
     billing_agreement_id?: string
+    // PROJ-011/ACP-448 — the sale's own charged amount, {total, currency}
+    // (note the field names: NOT the subscription resource's
+    // billing_info.last_payment.amount.{value, currency_code}). Confirmed
+    // against developer.paypal.com's deprecated Payments v1 "sale" resource
+    // (GET /v1/payments/sale/{sale_id}), 2026-08-28 — the same resource
+    // shape a PAYMENT.SALE.COMPLETED webhook's `resource` carries.
+    amount?: { total?: string; currency?: string }
   }
 }
 
