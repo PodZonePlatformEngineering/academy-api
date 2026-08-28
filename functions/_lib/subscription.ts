@@ -119,3 +119,32 @@ export async function upsertSubscription(client: PoolClient, fields: Subscriptio
     )
   }
 }
+
+/**
+ * ACP-441 — records the sale/capture id from a PAYMENT.SALE.COMPLETED
+ * event's resource.id against the subscription it billed
+ * (resource.billing_agreement_id). Separate from upsertSubscription (whose
+ * ON CONFLICT insert path this deliberately does NOT reuse): a payment
+ * event can only ever update an existing row — a sale can't be the first
+ * event PayPal ever delivers for a subscription (BILLING.SUBSCRIPTION.
+ * ACTIVATED precedes it in PayPal's own lifecycle), so there is no
+ * "attribute a brand-new row to a trainee" branch to mirror here. If no row
+ * matches (e.g. a stale Simulator test delivery, same class of harmless
+ * mismatch upsertSubscription's UnattributedSubscriptionError already
+ * tolerates), this silently no-ops rather than throwing — there is no
+ * refund target to record either way, and PayPal's at-least-once redelivery
+ * of a payload that will never match a real row gains nothing from an
+ * error the caller would just ack past regardless (see webhook.ts's own
+ * UnattributedSubscriptionError handling for the same reasoning).
+ */
+export async function recordCaptureId(
+  client: PoolClient,
+  paypalSubscriptionId: string,
+  captureId: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE subscription SET last_capture_id = $1, updated_at = now()
+     WHERE paypal_subscription_id = $2`,
+    [captureId, paypalSubscriptionId],
+  )
+}
