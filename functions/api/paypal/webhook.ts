@@ -22,9 +22,15 @@ import {
   hasAllTransmissionHeaders,
   isHandledEventType,
   PayPalVerificationError,
+  PAYMENT_SALE_COMPLETED,
   type WebhookEvent,
 } from '../../_lib/paypal'
-import { extractSubscriptionFields, upsertSubscription, UnattributedSubscriptionError } from '../../_lib/subscription'
+import {
+  extractSubscriptionFields,
+  upsertSubscription,
+  recordCaptureId,
+  UnattributedSubscriptionError,
+} from '../../_lib/subscription'
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const { request, env } = context
@@ -56,6 +62,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   } catch (e) {
     if (e instanceof PayPalVerificationError) return json({ error: e.message }, 502)
     throw e
+  }
+
+  // ACP-441 — PAYMENT.SALE.COMPLETED (the recurring-billing charge event)
+  // carries a "sale" resource, not a "subscription" resource: handled
+  // before isHandledEventType's BILLING.SUBSCRIPTION.*-shaped check below,
+  // since running it through extractSubscriptionFields/upsertSubscription
+  // would misread billing_agreement_id as nothing and status as ''.
+  if (event.event_type === PAYMENT_SALE_COMPLETED) {
+    const { id: captureId, billing_agreement_id: paypalSubscriptionId } = event.resource
+    if (paypalSubscriptionId) {
+      await withClient(env.NEON_DATABASE_URL, (client) =>
+        recordCaptureId(client, paypalSubscriptionId, captureId),
+      )
+    }
+    return json({ received: true, handled: true }, 200)
   }
 
   if (!isHandledEventType(event.event_type)) {

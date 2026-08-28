@@ -121,6 +121,16 @@ export const ALLOWED_ORIGINS: string[] = [
   // code or body to show — exactly this module's own doc comment above
   // already predicted for any unlisted origin.
   'https://academy-frontend-vibe-qa.pages.dev',
+  // PROJ-011/ACP-441 — academy-gui, the admin console POST /api/admin/refund
+  // is served for (both CF Pages projects, admin.podzone.academy's and
+  // admin.vibecreations.net's own custom domains plus their raw .pages.dev
+  // URLs, same "list every serving origin" discipline as the frontend
+  // entries above — deploy.yml deploys exactly these two projects, both
+  // `--branch main`).
+  'https://admin.podzone.academy',
+  'https://academy-gui.pages.dev',
+  'https://admin.vibecreations.net',
+  'https://academy-gui-vibe.pages.dev',
 ]
 
 export function corsHeaders(origin: string | null): Record<string, string> {
