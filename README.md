@@ -49,6 +49,7 @@ bare Worker instead — Pages Functions it is.
 | `_lib/subscription.ts` | new | Pure field extraction + idempotent `subscription` upsert. |
 | `_lib/turnCap.ts` | new (T-158) | `MONTHLY_TURN_CAP = 50` + `countMonthlyTurns`, the operator's T-161 rate-limit decision (a flat 50 turns/calendar month/subscription) folded into this brief. Counted off `ai_gateway_usage` — no new table. |
 | `_lib/gateway.ts` | new (T-158) | Hand-rolled `fetch()` + `response.body.tee()` proxy to Cloudflare AI Gateway's `/ai/v1/messages`, plus `readGatewayUsage` (pure SSE-parsing, unit-tested). See "Inference route" below for why this isn't the `@anthropic-ai/sdk` client despite resolving the SDK's auth-header question first. |
+| `_lib/email.ts` | new (ACP-444) | Resend `POST /emails` wrapper (`sendEmail`) + pure content builder (`renderOrderConfirmationEmail`), used by the webhook's `BILLING.SUBSCRIPTION.ACTIVATED` path. See "Order-confirmation email" below — **blocked on Resend domain verification**, not deployed live. |
 
 ## PayPal research — checked against current sources, not assumed
 
@@ -104,6 +105,60 @@ carried over from general knowledge or the brief's illustrative text.
 5. Otherwise: `extractSubscriptionFields` (pure) → `upsertSubscription`
    (idempotent — PayPal delivers at-least-once, so a duplicate delivery
    must produce the same end state, not a duplicate row or a crash).
+6. `BILLING.SUBSCRIPTION.ACTIVATED` only, additionally: resolve the trainee
+   row (`fields.customId` → `trainee.id`, same attribution `upsertSubscription`
+   already trusts) and, if it has an email, send an order-confirmation email
+   via `_lib/email.ts`. See "Order-confirmation email" below.
+
+### Order-confirmation email (`_lib/email.ts`, PROJ-011/ACP-444)
+
+Added as a pure side-effect of step 6 above — deliberately outside the
+`withClient`/`upsertSubscription` try/catch, so a Resend failure can never
+turn a successful subscription-upsert into a failed webhook ack (PayPal
+would just retry an identical delivery, which fixes nothing for a
+Resend-side config problem). A failure is `console.error`'d and swallowed;
+the response is still `{received: true, handled: true}`.
+
+Content (`renderOrderConfirmationEmail`) states only what the webhook
+payload actually carries — no invented legal/billing language (brief §4):
+plan is PayPal's own `plan_id` (no human-readable plan/pricing table exists
+in academy-admin yet), amount comes from `billing_info.last_payment.amount`
+(confirmed against `openapi/billing_subscriptions_v1.json`'s
+`subscription_billing_info` → `last_payment_details` → `money` schemas,
+2026-08-28) and is omitted, not guessed, when the event doesn't carry it
+(billing_info's own doc: "If the subscription was or is active, these
+fields are populated" — not a hard guarantee on every ACTIVATED delivery),
+same for `next_billing_time`. Support contact is a fixed
+`podzone.cloud@gmail.com` per brief §4.
+
+**Blocked: `RESEND_FROM_ADDRESS` — domain not verified, not deployed live.**
+Brief §5 named this as an explicit stop condition rather than something to
+guess around. Checked live (not assumed) against the real Resend account
+using the `resend-api-token` vault credential (a send-scoped key — it can't
+call `GET /domains`, so this was checked by attempting a real send, the
+most direct proof available):
+
+```
+POST /emails {from: "noreply@vibecreations.net", to: "podzone.cloud@gmail.com", ...}
+→ 403 {"message":"The vibecreations.net domain is not verified. Please, add
+   and verify your domain on https://resend.com/domains"}
+```
+
+`onboarding@resend.dev` (Resend's own shared sandbox sender, no
+verification required) **does** send successfully — proven live the same
+way — but using it as the production From-address for real trainee emails
+is a policy call outside this brief's scope (shared/unbranded sender, not
+what "noreply@vibecreations.net or similar" in brief §5 asked for), so it
+wasn't substituted in. `_lib/email.ts`/webhook.ts are fully wired and unit
+tested (`test/email.test.ts`) and will work the moment an operator verifies
+`vibecreations.net` (or another domain) in the Resend account's
+[resend.com/domains](https://resend.com/domains) and `RESEND_FROM_ADDRESS`
+is set to a From-address on that domain — no code change needed.
+`RESEND_API_KEY`/`RESEND_FROM_ADDRESS` are consequently **not** yet set as
+Pages secrets (see Deploy runbook) — setting them now would make the
+webhook silently start throwing `ResendApiError` on every ACTIVATED event
+until the domain step above is done, which is exactly the "unverified
+domain that will silently fail to send" brief §5 said to avoid.
 
 ### Retry-vs-drop on `UnattributedSubscriptionError` — resolved (T-152 §4)
 
@@ -546,6 +601,13 @@ isn't sensitive) + `CLOUDFLARE_API_TOKEN` (encrypted, the
 AI Gateway per T-150 §2). Not yet done (an
 operator action, needs the live URL below to exist first, which it now
 does):
+
+**Not set (ACP-444, blocked):** `RESEND_API_KEY`/`RESEND_FROM_ADDRESS` — the
+`resend-api-token` vault credential exists, but setting these on the `qa`
+Pages project now would just make the webhook throw `ResendApiError` on
+every real ACTIVATED delivery until an operator verifies a From-address
+domain in the Resend account. See "Order-confirmation email" above for the
+live-checked proof and exactly what unblocks this.
 
 1. Register the webhook URL (`https://academy-api.pages.dev/api/paypal/webhook`)
    against the sandbox app in the PayPal Developer dashboard, if
