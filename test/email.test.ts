@@ -98,4 +98,36 @@ describe('renderOrderConfirmationEmail', () => {
     expect(email.text).not.toContain('Amount:')
     expect(email.text).not.toContain('Next billing date:')
   })
+
+  // PROJ-011/ACP-449
+  it("renders one-off top-up copy with the exact turns granted, not a mislabelled subscription email", () => {
+    const email = renderOrderConfirmationEmail({
+      to: 'trainee@example.com',
+      traineeName: 'Eben',
+      planId: null,
+      amount: { currencyCode: 'GBP', value: '2.00' },
+      turnsGranted: 100,
+      nextBillingTime: null,
+      supportEmail: 'podzone.cloud@gmail.com',
+      kind: 'oneoff',
+    })
+    expect(email.subject).toBe('Your VibeCreations top-up is confirmed')
+    expect(email.text).toContain('top-up is confirmed')
+    expect(email.text).not.toContain('subscription')
+    expect(email.text).toContain('2.00 GBP')
+    expect(email.text).toContain('Turns added to your balance: 100')
+    expect(email.html).toContain('Turns added to your balance: 100')
+  })
+
+  it('omits the turns line when turnsGranted is not given (activation/renewal unaffected)', () => {
+    const email = renderOrderConfirmationEmail({
+      to: 'trainee@example.com',
+      traineeName: 'Eben',
+      planId: 'P-X',
+      amount: { currencyCode: 'GBP', value: '1.00' },
+      nextBillingTime: null,
+      supportEmail: 'podzone.cloud@gmail.com',
+    })
+    expect(email.text).not.toContain('Turns added')
+  })
 })

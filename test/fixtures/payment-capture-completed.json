@@ -1,0 +1,15 @@
+{
+  "id": "WH-4RT65189HH123456X-9H710293FL456789A",
+  "event_type": "PAYMENT.CAPTURE.COMPLETED",
+  "resource_type": "capture",
+  "create_time": "2026-08-29T10:15:03Z",
+  "summary": "Payment completed for order 5O190127TN364715T",
+  "resource": {
+    "id": "3TY12345AB678901C",
+    "status": "COMPLETED",
+    "custom_id": "42",
+    "amount": { "value": "2.00", "currency_code": "GBP" },
+    "supplementary_data": { "related_ids": { "order_id": "5O190127TN364715T" } },
+    "create_time": "2026-08-29T10:15:03Z"
+  }
+}

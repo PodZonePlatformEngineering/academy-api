@@ -107,8 +107,20 @@ export interface WebhookEvent {
     // billing_info.last_payment.amount.{value, currency_code}). Confirmed
     // against developer.paypal.com's deprecated Payments v1 "sale" resource
     // (GET /v1/payments/sale/{sale_id}), 2026-08-28 — the same resource
-    // shape a PAYMENT.SALE.COMPLETED webhook's `resource` carries.
-    amount?: { total?: string; currency?: string }
+    // shape a PAYMENT.SALE.COMPLETED webhook's `resource` carries. A third,
+    // yet again different, shape: PAYMENT.CAPTURE.COMPLETED's "capture"
+    // resource (ACP-449, Orders API v2) uses {value, currency_code} — see
+    // the fields immediately below.
+    amount?: { total?: string; currency?: string; value?: string; currency_code?: string }
+    // PROJ-011/ACP-449 — PAYMENT.CAPTURE.COMPLETED-only field. A "capture"
+    // resource (Orders API v2), confirmed against
+    // openapi/payments_payment_v2.json's capture schema: reuses the same
+    // top-level `custom_id` field declared above — this repo sets it on the
+    // *order's* purchase_unit at creation time (createOrder, below), and
+    // PayPal carries it straight through onto the resulting capture
+    // resource, so no `billing_agreement_id`-style join back to a stored
+    // row is needed to attribute the payment to a trainee.
+    supplementary_data?: { related_ids?: { order_id?: string } }
   }
 }
 
@@ -117,6 +129,15 @@ export interface WebhookEvent {
  * is a "sale", not a "subscription" (see WebhookEvent's field comments),
  * so it can't run through extractSubscriptionFields/upsertSubscription. */
 export const PAYMENT_SALE_COMPLETED = 'PAYMENT.SALE.COMPLETED'
+
+/** PROJ-011/ACP-449 — the one-off Orders API purchase's confirm event.
+ * Named identically in shape to PAYMENT_SALE_COMPLETED's handling (its own
+ * separate resource shape, not a subscription), but a genuinely different
+ * PayPal event: fired when an Orders v2 capture completes, not a
+ * subscription-billing charge. Event name confirmed against
+ * developer.paypal.com/api/rest/webhooks/event-names/, 2026-08-29.
+ */
+export const PAYMENT_CAPTURE_COMPLETED = 'PAYMENT.CAPTURE.COMPLETED'
 
 interface OAuthTokenResponse {
   access_token: string
@@ -397,4 +418,116 @@ export async function cancelSubscription(
   if (!resp.ok) {
     throw new PayPalApiError(`cancel subscription failed: ${resp.status} ${await resp.text()}`)
   }
+}
+
+// --- PROJ-011/ACP-449 — one-off top-up purchases (Orders API v2), a
+// genuinely separate PayPal integration path from everything above: no
+// PayPal "Plan" object, no billing agreement, no recurring charge. Request/
+// response shapes confirmed against
+// paypal/paypal-rest-api-specifications' openapi/checkout_orders_v2.json,
+// fetched 2026-08-29:
+//   - POST /v2/checkout/orders: `intent: "CAPTURE"`, one `purchase_units[]`
+//     entry with `amount.currency_code`/`amount.value` and `custom_id` (the
+//     Orders API's own per-purchase-unit field — NOT top-level like the
+//     Subscriptions API's `custom_id`, brief §4's "check the Orders API's
+//     own field, it may differ" is resolved: same field *name*, different
+//     *location*). Buyer redirect URLs live under
+//     `payment_source.paypal.experience_context.return_url`/`cancel_url` in
+//     this API version, not `application_context` (that's Subscriptions-
+//     API-only shape, see createSubscription above).
+//   - POST /v2/checkout/orders/{id}/capture: no request body, response
+//     carries the capture result nested under
+//     `purchase_units[].payments.captures[]` — this repo only needs to know
+//     the call succeeded (crediting quota happens off the
+//     PAYMENT.CAPTURE.COMPLETED webhook, not this response), so
+//     captureOrder returns just `{id, status}` off the top-level order
+//     object.
+
+export interface CreateOrderInput {
+  /** Server-validated against `quota.ts`'s ONE_OFF_PRICES_GBP by the
+   * caller (orders.ts) before this function is ever reached — this
+   * function itself does not re-validate, same trust boundary
+   * createSubscription draws around its own planId. */
+  amountValue: string
+  customId: string
+  returnUrl?: string
+  cancelUrl?: string
+}
+
+export interface CreatedOrder {
+  id: string
+  status: string
+  links: SubscriptionLink[]
+}
+
+/** POST /v2/checkout/orders — creates an order in `CREATED` state and
+ * returns the PayPal-hosted approval link (`links[].rel === 'approve'`) the
+ * caller redirects the buyer to, same shape createSubscription's caller
+ * already expects. */
+export async function createOrder(
+  apiBase: string,
+  accessToken: string,
+  input: CreateOrderInput,
+): Promise<CreatedOrder> {
+  const body: Record<string, unknown> = {
+    intent: 'CAPTURE',
+    purchase_units: [
+      {
+        custom_id: input.customId,
+        amount: { currency_code: 'GBP', value: input.amountValue },
+      },
+    ],
+  }
+  if (input.returnUrl && input.cancelUrl) {
+    body.payment_source = {
+      paypal: {
+        experience_context: {
+          return_url: input.returnUrl,
+          cancel_url: input.cancelUrl,
+        },
+      },
+    }
+  }
+  const resp = await fetch(`${apiBase}/v2/checkout/orders`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': crypto.randomUUID(),
+    },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`create order failed: ${resp.status} ${await resp.text()}`)
+  }
+  return (await resp.json()) as CreatedOrder
+}
+
+/** POST /v2/checkout/orders/{id}/capture — finalises the payment for an
+ * order the buyer has already approved on PayPal's hosted checkout
+ * (`orders/capture.ts` calls this once the trainee returns to
+ * academy-frontend). Crediting the trainee's quota balance happens off the
+ * resulting PAYMENT.CAPTURE.COMPLETED webhook delivery (webhook.ts), not
+ * off this response — mirrors the subscription channel's own division
+ * (createSubscription doesn't credit anything either; ACTIVATED does), so
+ * a trainee closing the tab after this call still gets credited once
+ * PayPal's webhook lands. */
+export async function captureOrder(
+  apiBase: string,
+  accessToken: string,
+  orderId: string,
+): Promise<{ id: string; status: string }> {
+  const resp = await fetch(`${apiBase}/v2/checkout/orders/${orderId}/capture`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': crypto.randomUUID(),
+    },
+  })
+  if (!resp.ok) {
+    throw new PayPalApiError(`capture order failed: ${resp.status} ${await resp.text()}`)
+  }
+  const data = (await resp.json()) as { id: string; status: string }
+  return { id: data.id, status: data.status }
 }

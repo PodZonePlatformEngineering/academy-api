@@ -704,3 +704,53 @@ proving `custom_id` round-trips doesn't require completing the
 buyer-approval flow). The only remaining gap is the JWT-minting one above,
 which is an infrastructure/product gap (no password-auth method enabled on
 this Neon Auth project), not a missing-credential one.
+
+## One-off top-up purchases (`functions/api/paypal/orders.ts`, `orders/capture.ts`, PROJ-011/ACP-449)
+
+A genuinely separate PayPal integration path from everything above: no
+Plan object, no billing agreement, no recurring charge — PayPal's Orders
+API v2 instead (`POST /v2/checkout/orders` to create, `POST
+/v2/checkout/orders/{id}/capture` to capture). Two prices only, £2 and £5,
+validated server-side against exactly `quota.ts`'s `ONE_OFF_PRICES_GBP` —
+a client-supplied arbitrary amount is rejected, never trusted through to
+PayPal.
+
+Pricing is computed off `resolveQuotaGrantAmount` (ACP-448's £1/month
+constant), not a second hardcoded absolute: £2 = 2x, £5 = 5x, operator-
+confirmed 2026-08-28. A QA `QUOTA_GRANT_AMOUNT` override moves both prices
+together automatically (`resolveOneOffQuotaAmount`, `test/quota.test.ts`).
+
+Three requests, not two, unlike the subscription channel's create+webhook
+shape — the Orders API has no "auto-activate on approve" behaviour the way
+a billing agreement does, so a real capture call is mandatory:
+
+1. `POST /api/paypal/orders` — creates the order (`custom_id` set on the
+   order's *purchase_unit*, confirmed against
+   `openapi/checkout_orders_v2.json` as a different field location than the
+   Subscriptions API's top-level `custom_id`, same field name), returns the
+   approval link.
+2. Trainee approves on PayPal's hosted checkout, returns to
+   academy-frontend's own return route.
+3. `POST /api/paypal/orders/capture` — academy-frontend calls this on
+   return to actually trigger the capture. No quota is credited here; this
+   only tells PayPal to take the payment.
+4. PayPal delivers `PAYMENT.CAPTURE.COMPLETED` (a "capture" resource,
+   confirmed against `openapi/payments_payment_v2.json`) to the existing
+   webhook route. `resource.custom_id` round-trips straight from step 1 —
+   no join back to a stored row needed, unlike the subscription channel's
+   `billing_agreement_id` lookup. `webhook.ts` credits
+   `resolveOneOffQuotaAmount(env, resource.amount.value)` turns onto
+   `trainee_quota_balance` (the same table/mechanism ACP-448 left, never a
+   second pool) and sends a `kind: 'oneoff'` order-confirmation email
+   (`_lib/email.ts`) stating the exact turns granted.
+
+No new PayPal credentials — same sandbox app (`PAYPAL_CLIENT_ID`/
+`PAYPAL_CLIENT_SECRET`/`PAYPAL_WEBHOOK_ID`/`PAYPAL_API_BASE`) the
+Subscriptions API channel already uses; Orders API calls are just a
+different set of endpoints against the same OAuth2 client-credentials
+token.
+
+Live sandbox verification: see this repo's PR for ACP-449 and
+academy-frontend's `e2e/topup.spec.ts` for the full checkout-to-credited-
+balance proof (£2 → 100 turns, £5 → 250 turns) against
+`paypal-vibecreations-sandbox-*`.
