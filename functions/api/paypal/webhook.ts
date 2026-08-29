@@ -34,6 +34,7 @@ import {
   isHandledEventType,
   PayPalVerificationError,
   PAYMENT_SALE_COMPLETED,
+  PAYMENT_CAPTURE_COMPLETED,
   type WebhookEvent,
 } from '../../_lib/paypal'
 import {
@@ -43,7 +44,7 @@ import {
   UnattributedSubscriptionError,
 } from '../../_lib/subscription'
 import { sendEmail, renderOrderConfirmationEmail } from '../../_lib/email'
-import { creditQuota, resolveQuotaGrantAmount } from '../../_lib/quota'
+import { creditQuota, resolveQuotaGrantAmount, resolveOneOffQuotaAmount, isOneOffPriceGbp } from '../../_lib/quota'
 
 const SUPPORT_EMAIL = 'podzone.cloud@gmail.com'
 
@@ -145,6 +146,66 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           console.error(`[paypal webhook] recurring-charge email failed: ${message}`)
         }
       }
+    }
+    return json({ received: true, handled: true }, 200)
+  }
+
+  // PROJ-011/ACP-449 — one-off top-up purchases (Orders API v2). A
+  // "capture" resource, distinct from both the subscription-shaped events
+  // below and PAYMENT.SALE.COMPLETED's "sale" shape above: attribution is
+  // via `resource.custom_id` directly (set on the order's purchase_unit at
+  // creation time, orders.ts) — no subscription row to join through, since
+  // a one-off purchase isn't a subscription at all (brief §4). Crediting is
+  // NOT best-effort, same reasoning as the PAYMENT.SALE.COMPLETED path
+  // above — a silently-dropped credit is a real product bug, not a soft
+  // failure. The turns credited are computed from the *captured* amount
+  // this event actually reports, never from a client-supplied hint of
+  // which button was clicked — an unrecognised amount (should never happen
+  // for a capture this repo itself created, but PayPal's payload is the
+  // only thing actually trusted here) is logged and no-opped rather than
+  // guessed at.
+  if (event.event_type === PAYMENT_CAPTURE_COMPLETED) {
+    const { id: captureId, custom_id: customId, amount } = event.resource
+    const traineeId = customId ? Number(customId) : NaN
+    if (Number.isInteger(traineeId) && amount?.value && isOneOffPriceGbp(amount.value)) {
+      const turns = resolveOneOffQuotaAmount(env, amount.value)
+      const recipient = await withClient(env.NEON_DATABASE_URL, async (client) => {
+        await creditQuota(client, traineeId, turns)
+        const result = await client.query<{ email: string | null; display_name: string | null }>(
+          'SELECT email, display_name FROM trainee WHERE id = $1',
+          [traineeId],
+        )
+        const row = result.rows[0]
+        return row?.email ? { email: row.email, display_name: row.display_name } : null
+      })
+      if (recipient) {
+        try {
+          const email = renderOrderConfirmationEmail({
+            to: recipient.email,
+            traineeName: recipient.display_name,
+            planId: null,
+            amount: { value: amount.value, currencyCode: amount.currency_code ?? 'GBP' },
+            turnsGranted: turns,
+            nextBillingTime: null,
+            supportEmail: SUPPORT_EMAIL,
+            kind: 'oneoff',
+          })
+          await sendEmail(env.RESEND_API_KEY, {
+            from: env.RESEND_FROM_ADDRESS,
+            to: recipient.email,
+            subject: email.subject,
+            html: email.html,
+            text: email.text,
+          })
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          console.error(`[paypal webhook] one-off purchase email failed: ${message}`)
+        }
+      }
+    } else {
+      console.error(
+        `[paypal webhook] PAYMENT.CAPTURE.COMPLETED (${captureId}) had no recognisable custom_id/amount — not credited`,
+      )
     }
     return json({ received: true, handled: true }, 200)
   }

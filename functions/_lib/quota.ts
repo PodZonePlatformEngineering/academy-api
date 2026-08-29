@@ -24,6 +24,33 @@ export function resolveQuotaGrantAmount(env: { QUOTA_GRANT_AMOUNT?: string }): n
   return Number.isFinite(override) && override > 0 ? override : DEFAULT_QUOTA_GRANT_AMOUNT
 }
 
+// PROJ-011/ACP-449 — one-off top-up purchases (PayPal Orders API, distinct
+// from the recurring-subscription channel above). Operator-confirmed
+// pricing ratio (2026-08-28): £2 = 2x the £1 subscription's monthly grant,
+// £5 = 5x. Computed off `resolveQuotaGrantAmount` rather than a second
+// hardcoded absolute number, so a QA override (or any future change to
+// DEFAULT_QUOTA_GRANT_AMOUNT) can't drift the two prices out of sync — a
+// £2 QA purchase always credits exactly 2x whatever a £1 QA subscription
+// payment would.
+export const ONE_OFF_PRICES_GBP = ['2.00', '5.00'] as const
+export type OneOffPriceGbp = (typeof ONE_OFF_PRICES_GBP)[number]
+
+const ONE_OFF_MULTIPLIERS: Record<OneOffPriceGbp, number> = {
+  '2.00': 2,
+  '5.00': 5,
+}
+
+export function isOneOffPriceGbp(value: string): value is OneOffPriceGbp {
+  return (ONE_OFF_PRICES_GBP as readonly string[]).includes(value)
+}
+
+/** Turns to credit for a one-off purchase of `priceGbp` (server-validated
+ * against exactly `ONE_OFF_PRICES_GBP` — never a client-supplied arbitrary
+ * amount), given the current QA-or-production grant amount. */
+export function resolveOneOffQuotaAmount(env: { QUOTA_GRANT_AMOUNT?: string }, priceGbp: OneOffPriceGbp): number {
+  return resolveQuotaGrantAmount(env) * ONE_OFF_MULTIPLIERS[priceGbp]
+}
+
 /** Current balance for `traineeId`, or 0 if the trainee has never had a
  * payment credited (no row yet — not an error, just "nothing accrued"). */
 export async function getQuotaBalance(client: PoolClient, traineeId: number): Promise<number> {

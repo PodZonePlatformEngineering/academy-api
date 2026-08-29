@@ -50,8 +50,16 @@ export interface OrderConfirmationInput {
    * PAYMENT.SALE.COMPLETED (the recurring-charge event folded into this
    * brief, ACP-446) — deliberately NOT "subscription is now active" copy,
    * since a renewal isn't a first signup (brief's own verification bar:
-   * "not a mislabelled first-signup email"). */
-  kind?: 'activation' | 'renewal'
+   * "not a mislabelled first-signup email"). PROJ-011/ACP-449 adds
+   * 'oneoff' — a top-up purchase, not a subscription at all, so it gets
+   * its own copy rather than reusing either. */
+  kind?: 'activation' | 'renewal' | 'oneoff'
+  /** PROJ-011/ACP-449 — the exact number of turns this payment credited
+   * (quota.ts's resolveOneOffQuotaAmount, read off the webhook's own
+   * captured amount, never guessed from which button the client says was
+   * clicked). Optional and only populated for 'oneoff' so far — 'activation'/
+   * 'renewal' callers are unchanged by this addition. */
+  turnsGranted?: number | null
 }
 
 /** Pure — builds the email content, no network. Kept separate from
@@ -65,13 +73,17 @@ export interface OrderConfirmationInput {
  * the webhook event didn't carry them. */
 export function renderOrderConfirmationEmail(input: OrderConfirmationInput): { subject: string; html: string; text: string } {
   const isRenewal = input.kind === 'renewal'
+  const isOneOff = input.kind === 'oneoff'
   const greeting = input.traineeName ? `Hi ${input.traineeName},` : 'Hi,'
-  const headline = isRenewal
-    ? 'Your VibeCreations subscription has renewed.'
-    : 'Your VibeCreations subscription is now active.'
+  const headline = isOneOff
+    ? 'Your VibeCreations quota top-up is confirmed.'
+    : isRenewal
+      ? 'Your VibeCreations subscription has renewed.'
+      : 'Your VibeCreations subscription is now active.'
   const lines = [greeting, '', headline, '']
   if (input.planId) lines.push(`Plan: ${input.planId}`)
   if (input.amount) lines.push(`Amount: ${input.amount.value} ${input.amount.currencyCode}`)
+  if (input.turnsGranted) lines.push(`Turns added to your balance: ${input.turnsGranted}`)
   if (input.nextBillingTime) lines.push(`Next billing date: ${input.nextBillingTime}`)
   lines.push('', `Questions? Contact us at ${input.supportEmail}.`, '', '— VibeCreations')
 
@@ -79,13 +91,18 @@ export function renderOrderConfirmationEmail(input: OrderConfirmationInput): { s
   const html = `<p>${greeting}</p><p>${headline}</p><ul>${[
     input.planId ? `<li>Plan: ${input.planId}</li>` : '',
     input.amount ? `<li>Amount: ${input.amount.value} ${input.amount.currencyCode}</li>` : '',
+    input.turnsGranted ? `<li>Turns added to your balance: ${input.turnsGranted}</li>` : '',
     input.nextBillingTime ? `<li>Next billing date: ${input.nextBillingTime}</li>` : '',
   ]
     .filter(Boolean)
     .join('')}</ul><p>Questions? Contact us at <a href="mailto:${input.supportEmail}">${input.supportEmail}</a>.</p><p>— VibeCreations</p>`
 
   return {
-    subject: isRenewal ? 'Your VibeCreations subscription has renewed' : 'Your VibeCreations subscription is confirmed',
+    subject: isOneOff
+      ? 'Your VibeCreations top-up is confirmed'
+      : isRenewal
+        ? 'Your VibeCreations subscription has renewed'
+        : 'Your VibeCreations subscription is confirmed',
     html,
     text,
   }
