@@ -136,6 +136,13 @@ export const ALLOWED_ORIGINS: string[] = [
   // code or body to show — exactly this module's own doc comment above
   // already predicted for any unlisted origin.
   'https://academy-frontend-vibe-qa.pages.dev',
+  // PROJ-011/ACP-473 — the QA custom-domain host qa.vibecreations.net
+  // actually serves academy-frontend-vibe-qa from (distinct from the raw
+  // academy-frontend-vibe-qa.pages.dev project URL already listed above).
+  // Missing here was the root cause of a live "Failed to fetch"/CORS
+  // preflight failure from the real QA custom domain against
+  // /api/tutor/chat and /api/examiner/chat.
+  'https://qa.vibecreations.net',
   // PROJ-011/ACP-441 — academy-gui, the admin console POST /api/admin/refund
   // is served for (both CF Pages projects, admin.podzone.academy's and
   // admin.vibecreations.net's own custom domains plus their raw .pages.dev
