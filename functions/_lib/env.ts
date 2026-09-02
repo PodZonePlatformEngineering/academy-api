@@ -153,6 +153,14 @@ export const ALLOWED_ORIGINS: string[] = [
   'https://academy-gui.pages.dev',
   'https://admin.vibecreations.net',
   'https://academy-gui-vibe.pages.dev',
+  // PROJ-011/ACP-475 — the QA admin console instance, sibling gap to
+  // ACP-473/474: academy-gui-vibe-qa's own .pages.dev URL plus its
+  // adminqa.vibecreations.net custom domain (confirmed live via a
+  // Cloudflare Pages API sweep of the academy-gui-vibe-qa project) were
+  // both missing here, so a QA admin refund call would CORS-fail exactly
+  // like ACP-473/474 did before their fixes.
+  'https://academy-gui-vibe-qa.pages.dev',
+  'https://adminqa.vibecreations.net',
 ]
 
 export function corsHeaders(origin: string | null): Record<string, string> {
