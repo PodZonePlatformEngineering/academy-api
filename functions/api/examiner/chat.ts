@@ -108,7 +108,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // Shared with the Teacher (brief decision 2) — the persistent quota
       // balance is decremented by either route, no separate exam quota.
       return json(
-        { error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more' },
+        { error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more', code: 'quota_exhausted' },
         429,
         origin,
       )

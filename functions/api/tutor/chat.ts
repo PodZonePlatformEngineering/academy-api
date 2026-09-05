@@ -115,7 +115,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return json({ error: `token turn cap reached (${gate.tokenTurnCap} turns)` }, 429, origin)
       }
     } else if (gate.quotaBalance! <= 0) {
-      return json({ error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more' }, 429, origin)
+      return json(
+        { error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more', code: 'quota_exhausted' },
+        429,
+        origin,
+      )
     }
     traineeId = gate.traineeId
     subscriptionId = gate.subscriptionId
