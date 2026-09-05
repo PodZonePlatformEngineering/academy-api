@@ -47,7 +47,7 @@ bare Worker instead — Pages Functions it is.
 | `_lib/entitlement.ts` | ported + extended (T-151, T-152, T-158) | Curriculum/track `isEntitled`/`assertEntitled` copied verbatim, **plus** `isFeatureEntitled`/`assertFeatureEntitled` (T-151, TS port of T-150's `academy.is_feature_entitled`/`assert_feature_entitled`), `resolveTraineeId` (T-152) — resolves a verified JWT `sub` to the numeric `trainee_id` `subscription.trainee_id`/PayPal's `custom_id` are keyed on, same GUC-dance shape throughout — **plus new** `resolveActiveSubscriptionId`/`insertUsageRow` (T-158). |
 | `_lib/paypal.ts` | new (T-151) + extended (T-152, ACP-445) | OAuth2 client-credentials token fetch, webhook-signature verification, event-type gating, **plus** `createSubscription`/`getSubscription` (T-152), **plus** `cancelSubscription` (ACP-445). See "PayPal research" below. |
 | `_lib/subscription.ts` | new + extended (ACP-445) | Pure field extraction + idempotent `subscription` upsert, **plus** `findOwnedSubscription` (ACP-445) — the self-service cancel endpoint's ownership check. |
-| `_lib/turnCap.ts` | new (T-158) | `MONTHLY_TURN_CAP = 50` + `countMonthlyTurns`, the operator's T-161 rate-limit decision (a flat 50 turns/calendar month/subscription) folded into this brief. Counted off `ai_gateway_usage` — no new table. |
+| `_lib/turnCap.ts` | new (T-158), trimmed by ACP-448, **retired by ACP-487 (deleted)** | `MONTHLY_TURN_CAP = 50` + `countMonthlyTurns`, the operator's T-161 rate-limit decision (a flat 50 turns/calendar month/subscription) folded into this brief. Counted off `ai_gateway_usage` — no new table. ACP-448 trimmed it to just `countTokenTurns` (a redeemed access-token's separate fixed turn budget); ACP-487 (2026-09-05) found that pool had gone stale once ACP-485 started crediting token redemptions onto `trainee_quota_balance` instead, and retired the whole file — a token-holder is now gated/decremented off the shared balance like everyone else (see `_lib/quota.ts`'s header comment and `tutor/chat.ts`). |
 | `_lib/gateway.ts` | new (T-158) | Hand-rolled `fetch()` + `response.body.tee()` proxy to Cloudflare AI Gateway's `/ai/v1/messages`, plus `readGatewayUsage` (pure SSE-parsing, unit-tested). See "Inference route" below for why this isn't the `@anthropic-ai/sdk` client despite resolving the SDK's auth-header question first. |
 | `_lib/email.ts` | new (ACP-444) | Resend `POST /emails` wrapper (`sendEmail`) + pure content builder (`renderOrderConfirmationEmail`), used by the webhook's `BILLING.SUBSCRIPTION.ACTIVATED` path. See "Order-confirmation email" below — **blocked on Resend domain verification**, not deployed live. |
 
@@ -754,3 +754,69 @@ Live sandbox verification: see this repo's PR for ACP-449 and
 academy-frontend's `e2e/topup.spec.ts` for the full checkout-to-credited-
 balance proof (£2 → 100 turns, £5 → 250 turns) against
 `paypal-vibecreations-sandbox-*`.
+
+## ACP-487 — token-turn-cap path reconciled with `trainee_quota_balance`
+
+`tutor/chat.ts` still branched a redeemed-`access_token` holder onto that
+token's own separate, fixed `turn_quota` (`turnCap.ts`'s `countTokenTurns`),
+gated on and decremented independently of `trainee_quota_balance` — correct
+when ACP-222/migration 064 wrote it (there was no balance yet), but stale
+once `vibecreations-db` migration 015 (ACP-485, applied to `qa` 2026-09-05)
+made `redeem_access_token()` credit the token's turns straight onto the
+balance instead. Two compounding bugs resulted: (1) `resolveActiveAccessToken`
+had no `ORDER BY`/`LIMIT`, so a trainee holding several redeemed tokens (only
+possible post-ACP-485, which also dropped the one-token-per-trainee unique
+index) had all-but-one silently ignored — the request was gated on an
+arbitrary single token's exhaustion, not all of them; (2) the balance
+ACP-485 credited on every redemption sat completely inert for a token
+holder, since `insertUsageRow`'s caller skipped `decrementQuota` outright
+whenever `accessTokenId` was truthy.
+
+**Fix**: retired the separate token-turn-cap path entirely.
+`resolveActiveAccessToken`/`turnCap.ts`/`countTokenTurns` are deleted —
+`tutor/chat.ts` now gates and decrements `trainee_quota_balance` for every
+trainee unconditionally, exactly matching `examiner/chat.ts`'s pre-existing
+(never-token-special-cased) behaviour. `ai_gateway_usage.access_token_id` is
+no longer populated going forward (always `null` from this route now): once
+a token's turns are indistinguishable from any other credited turns in the
+one shared balance, there is no principled "which token caused this usage"
+answer left to record — recording an arbitrary one would just reintroduce
+bug (1) in the audit trail. The column itself is untouched (a schema change
+is out of this brief's authorised scope); historical rows keep their
+existing `access_token_id` values.
+
+This was the brief-recommended default (option 2) once investigation
+confirmed there was no real reason to keep a separate pool: migration 064's
+own design note only ever justified the separation by "there is no
+subscription to also be ACTIVE for a token-only trainee" — true before
+ACP-448's balance existed, moot after it. Migration 015's own commentary
+independently reaches the same conclusion ("the balance is now the real
+source of truth").
+
+**Live-verified** against a disposable Neon branch off `vibecreations-
+training`'s `qa` (`curly-voice-88063025`, branched from `br-dark-darkness-
+zano4r5x`, deleted after): `vibecreations-training` is Postgres 18, which
+rejects the `request.jwt.claims` GUC impersonation trick `podzone-training`
+(pg17) accepts (same recurring gap as ACP-450/ACP-462/ACP-485) — worked
+around exactly as ACP-485 did, rehearsing `redeem_access_token`'s exact body
+via a parameterized throwaway `_test_redeem(trainee_id, code)` function
+(dropped before the branch was deleted) instead of the real RLS-gated RPC.
+A real trainee (id 2, zero prior balance/tokens/subscription) redeemed two
+freshly-seeded tokens (`turn_quota` 3 and 4):
+
+- Both redemptions succeeded (multi-redemption confirmed live, matching
+  ACP-485's dropped unique-index behaviour) and credited a single shared
+  balance of `3 + 4 = 7` — proving the "arbitrary one of several tokens"
+  bug's precondition (a trainee holding >1 redeemed token) is real and the
+  balance genuinely pools all of them, not just one.
+- Ran `_lib/quota.ts`'s exact `decrementQuota` SQL seven times: balance
+  stepped 7 → 6 → … → 0, then an eighth decrement was a correct no-op
+  (`WHERE balance > 0` guard held, balance stayed at 0) — proving a
+  trainee is now blocked only once the *whole* shared balance is
+  exhausted, not one arbitrary token's `turn_quota`, and that stale
+  ACP-485-credited balances (the brief's own concern 4) are now correctly
+  drained rather than stranded a second time.
+
+`tsc --noEmit`, `oxlint`, `npm test` (61 tests, all pre-existing — no test
+in this repo exercised the retired token-gating branch, so none needed
+updating) all clean.

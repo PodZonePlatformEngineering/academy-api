@@ -6,12 +6,31 @@
 //
 // Order, per the design doc §1 + the operator's T-161 rate-limit decision
 // folded in 2026-08-03, superseded by ACP-448's 2026-08-28 quota-balance
-// redesign: JWT verify -> resolve trainee_id -> assertFeatureEntitled
-// ('inference') -> quota-balance check (persistent, non-expiring — see
-// _lib/quota.ts; a token-holder's fixed lifetime budget is unchanged) ->
-// resolve the active subscription.id -> proxy to the Gateway, stream back
-// -> write the synchronous half of ai_gateway_usage + decrement the spent
-// turn off the balance.
+// redesign, and further reconciled by ACP-487 (2026-09-05, see below): JWT
+// verify -> resolve trainee_id -> assertFeatureEntitled('inference') ->
+// quota-balance check (persistent, non-expiring — see _lib/quota.ts,
+// shared by every trainee, token-redeemer or not) -> resolve the active
+// subscription.id -> proxy to the Gateway, stream back -> write the
+// synchronous half of ai_gateway_usage + decrement the spent turn off the
+// balance.
+//
+// PROJ-011/ACP-487 — this route used to branch a redeemed-access-token
+// holder onto a wholly separate, fixed lifetime turn_quota
+// (turnCap.ts's countTokenTurns), never touching trainee_quota_balance at
+// all. That was correct when it was written (academy-admin migration 064,
+// before the balance concept existed) but vibecreations-db migration 015
+// (ACP-485) already made redeem_access_token() credit turn_quota straight
+// onto the shared balance — leaving this route's own separate-pool branch
+// stale: it gated solely on one arbitrary redeemed token's own count
+// (`resolveActiveAccessToken` had no ORDER BY/LIMIT, so a trainee holding
+// several tokens had all-but-one silently ignored), while the balance
+// ACP-485 had already credited sat completely inert (never decremented,
+// since the accessTokenId branch skipped decrementQuota entirely). Retired
+// here: a token-holder is now gated and decremented exactly like every
+// other trainee, matching examiner/chat.ts's (pre-existing, never
+// special-cased) behaviour. This also starts correctly draining any
+// balance a token redemption already credited before this fix shipped —
+// no separate backfill needed, since the balance itself was already right.
 //
 // No academy-frontend changes here (task 2 of the 3-brief breakdown,
 // t157-inference-delivery-design.md §5) — this route is deliberately
@@ -26,14 +45,12 @@ import {
   assertFeatureEntitled,
   isFeatureEntitled,
   resolveActiveSubscriptionId,
-  resolveActiveAccessToken,
   insertUsageRow,
   backfillCost,
   executeCreateDocument,
   UnknownTraineeError,
   NotEntitled,
 } from '../../_lib/entitlement'
-import { countTokenTurns } from '../../_lib/turnCap'
 import { getQuotaBalance, decrementQuota } from '../../_lib/quota'
 import {
   proxyToGateway,
@@ -74,7 +91,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   let traineeId: number
   let subscriptionId: number | null
-  let accessTokenId: number | null
   let hasLibraryAccess: boolean
   try {
     const gate = await withClient(env.NEON_DATABASE_URL, async (client) => {
@@ -86,35 +102,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       // all, so a non-entitled trainee's request is structurally tool-free.
       const resolvedLibraryAccess = await isFeatureEntitled(client, traineeSub, 'personal_library')
       const resolvedSubscriptionId = await resolveActiveSubscriptionId(client, resolvedTraineeId)
-      // PROJ-011/ACP-222 — a token, not a subscription, may be what granted
-      // the assertFeatureEntitled check above. A token doesn't stack with
-      // the flat subscription cap: its own turn_quota replaces
-      // MONTHLY_TURN_CAP entirely for a token-holder (design note in
-      // academy-admin migration 064).
-      const resolvedAccessToken = await resolveActiveAccessToken(client, resolvedTraineeId)
-      // PROJ-011/ACP-448 — a token-holder's fixed lifetime budget stays
-      // exactly as it was (turnCap.ts's countTokenTurns/turnQuota,
-      // unaffected by this brief, brief §5); everyone else now gates on
-      // the persistent, non-expiring quota balance (_lib/quota.ts)
-      // instead of a calendar-month turn count.
-      const tokenTurnCount = resolvedAccessToken ? await countTokenTurns(client, resolvedAccessToken.id) : null
-      const quotaBalance = resolvedAccessToken ? null : await getQuotaBalance(client, resolvedTraineeId)
+      // PROJ-011/ACP-487 — a redeemed access token no longer gates on its
+      // own separate turn_quota (see this file's header comment): every
+      // trainee, token-redeemer or not, is gated on the one shared
+      // trainee_quota_balance, exactly like examiner/chat.ts already does.
+      const quotaBalance = await getQuotaBalance(client, resolvedTraineeId)
       return {
         traineeId: resolvedTraineeId,
         subscriptionId: resolvedSubscriptionId,
-        accessTokenId: resolvedAccessToken?.id ?? null,
         hasLibraryAccess: resolvedLibraryAccess,
-        tokenTurnCount,
-        tokenTurnCap: resolvedAccessToken?.turnQuota ?? null,
         quotaBalance,
       }
     })
-    if (gate.accessTokenId) {
-      // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
-      if (gate.tokenTurnCount! >= gate.tokenTurnCap!) {
-        return json({ error: `token turn cap reached (${gate.tokenTurnCap} turns)` }, 429, origin)
-      }
-    } else if (gate.quotaBalance! <= 0) {
+    // Don't burn a Gateway call to reject a request (brief, T-161 fold-in).
+    if (gate.quotaBalance <= 0) {
       return json(
         { error: 'quota balance exhausted — subscribe or wait for your next payment to accrue more', code: 'quota_exhausted' },
         429,
@@ -123,7 +124,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     traineeId = gate.traineeId
     subscriptionId = gate.subscriptionId
-    accessTokenId = gate.accessTokenId
     hasLibraryAccess = gate.hasLibraryAccess
   } catch (e) {
     if (e instanceof UnknownTraineeError) return json({ error: e.message }, 404, origin)
@@ -170,14 +170,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const usage = await gatewayResult.usage
       const gatewayLogId = gatewayResult.gatewayLogId
       const rowId = await withClient(env.NEON_DATABASE_URL, async (client) => {
-        const id = await insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId, accessTokenId)
+        // PROJ-011/ACP-487 — no accessTokenId to record any more (see
+        // header comment): a token-redeemer's usage is indistinguishable
+        // from any other trainee's, spent off the one shared balance below.
+        const id = await insertUsageRow(client, traineeId, subscriptionId, usage, gatewayLogId, null)
         // PROJ-011/ACP-448 — spend the turn off the persistent quota
-        // balance, not the token's fixed pool (accessTokenId holders never
-        // touch trainee_quota_balance at all, brief §5). Same async-after-
-        // the-fact timing insertUsageRow itself already has: the turn was
-        // already served by the pre-flight balance check above, this just
-        // records the spend.
-        if (!accessTokenId) await decrementQuota(client, traineeId)
+        // balance. Same async-after-the-fact timing insertUsageRow itself
+        // already has: the turn was already served by the pre-flight
+        // balance check above, this just records the spend.
+        await decrementQuota(client, traineeId)
         return id
       })
       // Async half (T-160): cost isn't on the inference response, only on
