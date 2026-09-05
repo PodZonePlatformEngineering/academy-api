@@ -7,9 +7,12 @@
 // subscription keeps its balance and keeps granting `inference`/
 // `examination` (see the migration's own `is_feature_entitled` change,
 // decision 1). Credited on each PAYMENT.SALE.COMPLETED webhook delivery
-// (webhook.ts), decremented by 1 per spent turn (tutor/chat.ts,
-// examiner/chat.ts) — never merged with `access_token.turn_quota`
-// (turnCap.ts's `countTokenTurns`), which stays a completely separate pool.
+// (webhook.ts) and on redeeming an `access_token` (vibecreations-db
+// migration 015, PROJ-011/ACP-485), decremented by 1 per spent turn
+// (tutor/chat.ts, examiner/chat.ts) — a redeemed token's turns are no
+// longer a separate pool (PROJ-011/ACP-487 retired that branch; see
+// tutor/chat.ts's header comment), they're credited straight onto this
+// same balance and spent exactly like everyone else's.
 import type { PoolClient } from '@neondatabase/serverless'
 
 // PROJ-011/ACP-409's QA-reachability override concept carries over: unset

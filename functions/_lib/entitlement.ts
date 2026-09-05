@@ -150,25 +150,6 @@ export async function resolveActiveSubscriptionId(
 }
 
 /**
- * PROJ-011/ACP-222 — the trainee's own redeemed `access_token`, if any (a
- * trainee can hold at most one, ever — academy-admin migration 064's
- * `access_token_redeemed_by_trainee_id_key`). Same plain-admin-connection
- * posture as `resolveActiveSubscriptionId`: `traineeId` is already a
- * resolved, verified numeric id, no per-trainee GUC session needed.
- */
-export async function resolveActiveAccessToken(
-  client: PoolClient,
-  traineeId: number,
-): Promise<{ id: number; turnQuota: number } | null> {
-  const result = await client.query<{ id: number; turn_quota: number }>(
-    `SELECT id, turn_quota FROM access_token WHERE redeemed_by_trainee_id = $1`,
-    [traineeId],
-  )
-  const row = result.rows[0]
-  return row ? { id: row.id, turnQuota: row.turn_quota } : null
-}
-
-/**
  * Synchronous half of the `ai_gateway_usage` write (t157-inference-delivery-
  * design.md §3): everything the Gateway's Anthropic-schema response carries
  * directly (`model`, token counts) is inserted immediately off the back of
