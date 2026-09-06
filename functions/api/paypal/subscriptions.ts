@@ -17,7 +17,13 @@ import { withClient } from '../../_lib/db'
 import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
 import { verifyBetterAuthTraineeSub } from '../../_lib/betterAuthJwt'
 import { resolveTraineeId, UnknownTraineeError } from '../../_lib/entitlement'
-import { getAccessToken, createSubscription, PayPalApiError, PayPalVerificationError } from '../../_lib/paypal'
+import {
+  getAccessToken,
+  createSubscription,
+  findRedirectLink,
+  PayPalApiError,
+  PayPalVerificationError,
+} from '../../_lib/paypal'
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
 
@@ -63,20 +69,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       cancelUrl,
     })
 
-    const approveLink = subscription.links.find((l) => l.rel === 'approve')?.href
-    if (!approveLink) {
-      // PayPal's own documented response always includes this on a
-      // successful create (confirmed against the OpenAPI spec's example) —
-      // its absence means something unexpected came back, not a normal
-      // error path to swallow.
-      return json({ error: 'PayPal response had no approve link', subscription }, 502, origin)
+    const redirectLink = findRedirectLink(subscription.links)
+    if (!redirectLink) {
+      // PayPal's own documented response always includes one of these two
+      // on a successful create (confirmed against the OpenAPI spec's
+      // example, plus the Orders v2 payer-action docs — see
+      // findRedirectLink's doc comment) — its absence means something
+      // unexpected came back, not a normal error path to swallow.
+      return json({ error: 'PayPal response had no approve or payer-action link', subscription }, 502, origin)
     }
 
     return json(
       {
         subscriptionId: subscription.id,
         status: subscription.status,
-        approvalUrl: approveLink,
+        approvalUrl: redirectLink.href,
+        linkRel: redirectLink.rel,
       },
       201,
       origin,

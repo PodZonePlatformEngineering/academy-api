@@ -256,6 +256,19 @@ export interface SubscriptionLink {
   method: string
 }
 
+/** Both createOrder and createSubscription's response can carry the
+ * buyer-redirect href under either `rel: 'approve'` (the usual `CREATED` /
+ * `APPROVAL_PENDING` shape) or `rel: 'payer-action'` (returned instead when
+ * PayPal's status is `PAYER_ACTION_REQUIRED` — confirmed against PayPal's
+ * own Orders v2 docs, fetched 2026-09-06, this is the same "buyer needs to
+ * act on PayPal's checkout page next" outcome, not a different buyer flow;
+ * PayPal just names the link differently depending on why the buyer's
+ * action is needed, e.g. initial approval vs re-approving an amount
+ * change). Callers redirect to whichever of the two is present. */
+export function findRedirectLink(links: SubscriptionLink[]): SubscriptionLink | undefined {
+  return links.find((l) => l.rel === 'approve' || l.rel === 'payer-action')
+}
+
 export interface CreatedSubscription {
   id: string
   status: string
