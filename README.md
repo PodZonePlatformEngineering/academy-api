@@ -755,6 +755,54 @@ academy-frontend's `e2e/topup.spec.ts` for the full checkout-to-credited-
 balance proof (£2 → 100 turns, £5 → 250 turns) against
 `paypal-vibecreations-sandbox-*`.
 
+**PROJ-011/ACP-501, 2026-09-07 — the confirmation poll never resolving on
+`vibe-qa`, root cause found, operator action required.** After ACP-499/500
+fixed the two `orders.ts`/e2e bugs blocking a `£2` top-up from completing
+checkout at all, a live-verified re-run (`academy-frontend` CI run
+`34115707110` against `qa`, `e2e/topup.spec.ts`, trace pulled and inspected)
+still failed the same way described in the original brief: the return page
+never leaves "pending confirmation" within its 120s poll budget. The trace
+shows `POST /api/paypal/orders/capture` returning `200` on every single
+poll attempt (12/12) — **step 3 (the capture call) is not the problem**,
+ruling out an `academy-api` code bug in this route.
+
+The actual cause is step 4, confirmed directly against the PayPal REST API
+(`GET /v1/notifications/webhooks`, OAuth2'd with the same
+`PAYPAL_CLIENT_ID`/`PAYPAL_CLIENT_SECRET` this route already uses) rather
+than guessed: **the webhook registered against
+`https://academy-api-vibe-qa.pages.dev/api/paypal/webhook`** (webhook id
+`2PT845872D294494T`, registered under the "Default"/QA sandbox app per ACP-434's own
+`academy-api-vibe-qa` split — confirmed via
+`PAYPAL_WEBHOOK_ID` living on that Pages project) **is only subscribed to
+the five `BILLING.SUBSCRIPTION.*` event types — `PAYMENT.CAPTURE.COMPLETED`
+is not in its `event_types` list at all.** `webhook.ts` already handles
+`PAYMENT.CAPTURE.COMPLETED` correctly (`_lib/paypal.ts`'s
+`PAYMENT_CAPTURE_COMPLETED` constant, gated through `isHandledEventType`)
+— PayPal is simply never delivering the event in the first place, so the
+handler code is never reached. This is why `subscribe.spec.ts`
+(`BILLING.SUBSCRIPTION.ACTIVATED`) passes cleanly on the same target while
+`topup.spec.ts`'s webhook-dependent assertion never resolves.
+
+**Not `vibe-qa`-specific — checked all four registered sandbox webhooks,
+none of them are subscribed to `PAYMENT.CAPTURE.COMPLETED`:**
+`academy-api-qa`'s (`33371708RT8394135`), `academy-api-vibe-qa`'s
+(`2PT845872D294494T`), and both webhooks pointed at the generic
+`academy-api.pages.dev` URL — one under the "Default" app
+(`7S5206055D247271W`) and one under the "VibeCreations"/production app
+(`4TK142903U503644J`). One-off top-ups are very likely broken the same way
+on every target right now, not just `vibe-qa`; this brief's own scope
+(`vibe-qa` only) is the reason the other three weren't live-reproduced
+here, not evidence they're fine.
+
+**Operator/Team-Lead action needed (not made here — no write access to the
+PayPal Developer dashboard, and this is exactly the class of change this
+brief's own "Not authorised" section reserves for a human): add
+`PAYMENT.CAPTURE.COMPLETED` to each of the four webhooks' subscribed event
+types above.** No code change, no Cloudflare Pages env var change, and no
+new webhook registration needed — same webhook id, same URL, same
+`PAYPAL_WEBHOOK_ID` on each Pages project, just widening which events
+PayPal actually sends to it.
+
 ## ACP-487 — token-turn-cap path reconciled with `trainee_quota_balance`
 
 `tutor/chat.ts` still branched a redeemed-`access_token` holder onto that
