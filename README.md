@@ -803,6 +803,35 @@ new webhook registration needed — same webhook id, same URL, same
 `PAYPAL_WEBHOOK_ID` on each Pages project, just widening which events
 PayPal actually sends to it.
 
+**Resolution, 2026-09-07 (same day) — operator added `PAYMENT.CAPTURE.COMPLETED`
+to all four webhooks, confirmed live via the same `GET /v1/notifications/webhooks`
+check. That was necessary but not sufficient: a fresh `topup.spec.ts` run
+still failed the same way, and a live diagnostic (a standalone Playwright
+script with network + console capture, run directly against
+`academy-frontend-vibe-qa.pages.dev`) proved the webhook was now firing and
+`trainee_quota_balance` genuinely crediting within seconds — the remaining
+bug was entirely client-side, in `academy-frontend`'s
+`src/pages/TopUpReturn.tsx`/`src/hooks/useQuotaBalance.ts`. Four distinct
+bugs there, found and fixed in sequence (each verified live before moving
+to the next): (1) the "Check again" button did a full
+`window.location.reload()` instead of a state re-fetch; (2) `startBalance`
+was captured via a `useState(() => quota.balance)` initializer that ran
+before the async balance fetch ever resolved, so it was permanently
+`undefined`; (3) the capture effect's dependency array included
+`quota.balance`/`quota.ready`, both of which change on every poll — React
+tearing down the previous effect invocation on each poll's re-run silently
+poisoned the in-flight `captureTopUpOrder()` promise before its `.then()`
+could fire; (4) `useQuotaBalance` itself briefly reported `ready:true,
+balance:0` before auth genuinely resolved on this specific
+post-PayPal-redirect page load — fixed by gating the balance snapshot on a
+real signed-in user rather than trusting the first `ready:true`. See
+`academy-frontend` commits `83a2a51`, `14ebcd2`, `fbad27b`, `3f59c90`,
+`c57c7e6`, `63fddc0`, `b8d57be` (the last fixes `topup.spec.ts`'s own
+pre-existing wrong balance assertion — 100 vs. the correct 102, once the
+flow finally worked far enough to reach it). Fully green: `topup.spec.ts`
+passes end to end against `vibe-qa` (`academy-frontend` CI run
+`34144279381`).**
+
 ## ACP-487 — token-turn-cap path reconciled with `trainee_quota_balance`
 
 `tutor/chat.ts` still branched a redeemed-`access_token` holder onto that
