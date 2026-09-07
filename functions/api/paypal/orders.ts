@@ -16,7 +16,7 @@ import { withClient } from '../../_lib/db'
 import { verifyTraineeSub, AuthError } from '../../_lib/jwt'
 import { verifyBetterAuthTraineeSub } from '../../_lib/betterAuthJwt'
 import { resolveTraineeId, UnknownTraineeError } from '../../_lib/entitlement'
-import { getAccessToken, createOrder, PayPalApiError, PayPalVerificationError } from '../../_lib/paypal'
+import { getAccessToken, createOrder, findRedirectLink, PayPalApiError, PayPalVerificationError } from '../../_lib/paypal'
 import { isOneOffPriceGbp } from '../../_lib/quota'
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => handleOptions(context.request)
@@ -71,16 +71,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       cancelUrl,
     })
 
-    const approveLink = order.links.find((l) => l.rel === 'approve')?.href
-    if (!approveLink) {
-      return json({ error: 'PayPal response had no approve link', order }, 502, origin)
+    const redirectLink = findRedirectLink(order.links)
+    if (!redirectLink) {
+      return json({ error: 'PayPal response had no approve or payer-action link', order }, 502, origin)
     }
 
     return json(
       {
         orderId: order.id,
         status: order.status,
-        approvalUrl: approveLink,
+        approvalUrl: redirectLink.href,
+        linkRel: redirectLink.rel,
       },
       201,
       origin,

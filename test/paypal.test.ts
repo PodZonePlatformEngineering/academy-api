@@ -9,6 +9,7 @@ import {
   isHandledEventType,
   hasAllTransmissionHeaders,
   readTransmissionHeaders,
+  findRedirectLink,
 } from '../functions/_lib/paypal'
 
 describe('HANDLED_EVENT_TYPES', () => {
@@ -34,6 +35,29 @@ describe('isHandledEventType', () => {
     expect(isHandledEventType('BILLING.SUBSCRIPTION.CREATED')).toBe(false)
     expect(isHandledEventType('BILLING.SUBSCRIPTION.PAYMENT.FAILED')).toBe(false)
     expect(isHandledEventType('PAYMENT.AUTHORIZATION.CREATED')).toBe(false)
+  })
+})
+
+describe('findRedirectLink', () => {
+  it('picks the approve link on the usual CREATED / APPROVAL_PENDING shape', () => {
+    const links = [
+      { href: 'https://api.paypal.com/v2/checkout/orders/O-1', rel: 'self', method: 'GET' },
+      { href: 'https://www.paypal.com/checkoutnow?token=O-1', rel: 'approve', method: 'GET' },
+    ]
+    expect(findRedirectLink(links)).toEqual(links[1])
+  })
+
+  it('picks the payer-action link on the PAYER_ACTION_REQUIRED shape (ACP-499)', () => {
+    const links = [
+      { href: 'https://api.paypal.com/v2/checkout/orders/O-2', rel: 'self', method: 'GET' },
+      { href: 'https://www.paypal.com/checkoutnow?token=O-2', rel: 'payer-action', method: 'GET' },
+    ]
+    expect(findRedirectLink(links)).toEqual(links[1])
+  })
+
+  it('returns undefined when neither link is present', () => {
+    const links = [{ href: 'https://api.paypal.com/v2/checkout/orders/O-3', rel: 'self', method: 'GET' }]
+    expect(findRedirectLink(links)).toBeUndefined()
   })
 })
 
