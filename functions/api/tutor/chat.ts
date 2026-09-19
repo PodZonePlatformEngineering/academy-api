@@ -159,6 +159,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           gatewayMode,
           env.GATEWAY_ID,
           env.ANTHROPIC_API_KEY_QA,
+          // PROJ-011/ACP-517 — this trainee has inference but not
+          // personal_library access (the branch condition above), so ground
+          // the tutor's refusal in the actual gate rather than a generic
+          // disclaimer.
+          true,
         )
   } catch (e) {
     if (e instanceof GatewayError) return json({ error: e.message }, 502, origin)
