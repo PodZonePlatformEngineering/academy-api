@@ -173,6 +173,23 @@ const CREATE_DOCUMENT_TOOL_CONVENTION =
   'immediately with no preceding commentary — explain what you did in ' +
   'your next reply, after the tool result comes back.'
 
+// PROJ-011/ACP-517 — this trainee is entitled to inference (has a turn
+// balance) but not to personal_library, so this request is structurally
+// tool-free: there is no create_document tool to call, full stop. Without
+// this notice the model has no grounding for *why* and tends to improvise a
+// vague, generic "I can't do that from here" disclaimer that reads like a
+// permanent capability gap. Ground the refusal in the actual, narrow,
+// actionable reason instead.
+const LIBRARY_ACCESS_GAP_NOTICE =
+  'You have no create_document tool this turn. This trainee has chat access ' +
+  '(a turn balance) but not personal_library access. If they ask you to ' +
+  'save, create, or export a document to their library, do not imply that ' +
+  'document saving is unavailable in general or point them elsewhere — say ' +
+  'specifically that saving to their library needs an active subscription ' +
+  '(or a redeemed access token), which they do not currently have, and that ' +
+  'document saving turns on immediately in this same chat as soon as they ' +
+  'subscribe or redeem a token.'
+
 // PROJ-011/T-214 — a second tool offered by the same interception loop
 // (design doc §3.2: "reuse this exact mechanism... rather than inventing a
 // second way to get a privileged write out of an LLM turn"). Offered only by
@@ -219,14 +236,15 @@ export interface ToolOffer {
 }
 
 /**
- * Append the tool-use convention as an extra system block, never mutate the
- * existing one(s). Appending AFTER whatever the client sent preserves
- * academy-frontend's T-114 cache breakpoint on its own block untouched — the
- * cached prefix is unchanged, this is new uncached content tacked onto the
- * end, not a rewrite of the cached content.
+ * Append a text block to `system`, never mutating the existing one(s).
+ * Appending AFTER whatever the client sent preserves academy-frontend's
+ * T-114 cache breakpoint on its own block untouched — the cached prefix is
+ * unchanged, this is new uncached content tacked onto the end, not a
+ * rewrite of the cached content. Used both for the tool-use convention and
+ * (ACP-517) the library-access-gap notice.
  */
-function withToolConvention(system: unknown, convention: string): unknown {
-  const appendix = { type: 'text', text: convention }
+function appendSystemBlock(system: unknown, text: string): unknown {
+  const appendix = { type: 'text', text }
   if (Array.isArray(system)) return [...system, appendix]
   if (typeof system === 'string') return [{ type: 'text', text: system }, appendix]
   return [appendix]
@@ -478,7 +496,7 @@ export async function proxyToGatewayWithTools(
   gatewayId: string = TUTOR_GATEWAY_ID,
   anthropicApiKey?: string,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
-  const system = withToolConvention(body.system, offer.convention)
+  const system = appendSystemBlock(body.system, offer.convention)
   let messages = body.messages
   let gatewayLogId: string | null = null
   const roundUsages: Promise<GatewayUsage>[] = []
@@ -618,6 +636,12 @@ export function recordExaminerVerdictToolOffer(
  * reading (the caller awaits this only in the background, via
  * `context.waitUntil`, so returning the streaming Response is not delayed by
  * it).
+ *
+ * `includeLibraryGapNotice` (ACP-517, tutor/chat.ts only — never set by
+ * examiner/chat.ts) appends `LIBRARY_ACCESS_GAP_NOTICE` so a trainee with
+ * inference but not personal_library access gets a refusal grounded in the
+ * actual gate, not a generic disclaimer. Purely additive to `system`; the
+ * request stays tool-free either way (this is the no-tools code path).
  */
 export async function proxyToGateway(
   accountId: string,
@@ -627,12 +651,14 @@ export async function proxyToGateway(
   mode: GatewayMode = 'real',
   gatewayId: string = TUTOR_GATEWAY_ID,
   anthropicApiKey?: string,
+  includeLibraryGapNotice = false,
 ): Promise<{ response: Response; usage: Promise<GatewayUsage>; gatewayLogId: string | null }> {
+  const system = includeLibraryGapNotice ? appendSystemBlock(body.system, LIBRARY_ACCESS_GAP_NOTICE) : body.system
   const upstream = await fetchGatewayStream(
     accountId,
     apiToken,
     metadata,
-    { system: body.system, messages: body.messages },
+    { system, messages: body.messages },
     mode,
     gatewayId,
     anthropicApiKey,

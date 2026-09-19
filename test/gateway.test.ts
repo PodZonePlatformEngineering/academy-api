@@ -144,3 +144,68 @@ describe('proxyToGateway mock mode', () => {
     expect(fetchSpy).toHaveBeenCalled()
   })
 })
+
+// PROJ-011/ACP-517 — a trainee with inference but not personal_library
+// access hits this no-tools code path; the appended system block is what
+// grounds the tutor's refusal copy in the actual gate instead of a generic
+// disclaimer.
+describe('proxyToGateway includeLibraryGapNotice', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('appends the library-access-gap notice as an extra system block when true', async () => {
+    let sentBody: Record<string, unknown> = {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sentBody = JSON.parse(init.body as string)
+        return new Response(sseToRaw([{ type: 'message_stop', data: { type: 'message_stop' } }]), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }),
+    )
+
+    await proxyToGateway(
+      'acc123',
+      'token',
+      { trainee_id: 1, subscription_id: null },
+      { system: 'base prompt', messages: [{ role: 'user', content: 'save this as a doc' }] },
+      'real',
+      'training-gateway',
+      undefined,
+      true,
+    )
+
+    expect(sentBody.system).toEqual([
+      { type: 'text', text: 'base prompt' },
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('personal_library') }),
+    ])
+  })
+
+  it('leaves system untouched when false (default)', async () => {
+    let sentBody: Record<string, unknown> = {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sentBody = JSON.parse(init.body as string)
+        return new Response(sseToRaw([{ type: 'message_stop', data: { type: 'message_stop' } }]), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }),
+    )
+
+    await proxyToGateway(
+      'acc123',
+      'token',
+      { trainee_id: 1, subscription_id: null },
+      { system: 'base prompt', messages: [] },
+    )
+
+    expect(sentBody.system).toBe('base prompt')
+  })
+})
+
+function sseToRaw(events: Array<{ type: string; data: Record<string, unknown> }>): string {
+  return events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`).join('')
+}
